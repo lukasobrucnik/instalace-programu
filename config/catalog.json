@@ -1,0 +1,307 @@
+﻿{
+  "schemaVersion": 1,
+  "categories": [
+    { "id": "zaklad", "name": "Povinný základ" },
+    { "id": "kancelar", "name": "Kancelář a komunikace" },
+    { "id": "ms365", "name": "Microsoft 365" },
+    { "id": "grafika", "name": "Grafika a multimédia" },
+    { "id": "sprava", "name": "IT a správa" },
+    { "id": "technicke", "name": "Technické programy" },
+    { "id": "firemni", "name": "Firemní aplikace" },
+    { "id": "vyvoj", "name": "Vývoj a nástroje" }
+  ],
+
+  "bundles": [
+    { "id": "novy-pc", "name": "Nový počítač", "description": "Povinný základ + čtečka PDF a kancelář zdarma", "items": ["acrobat", "libreoffice"] },
+    { "id": "kancelar", "name": "Kancelář", "description": "Microsoft 365, Teams, OneDrive, Acrobat, eM Client", "items": ["m365", "teams", "onedrive", "acrobat", "emclient"] },
+    { "id": "spedice", "name": "Spedice", "description": "ComArr Sped, Crystal Reports, MyWAC", "items": ["comarr", "crystal", "mywac", "acrobat"] },
+    { "id": "technik", "name": "Technik / CAD", "description": "Prohlížeče výkresů a runtime", "items": ["edrawings", "trueview", "dwgsee", "bentley", "crystal"] },
+    { "id": "podpora", "name": "Vzdálená podpora", "description": "VPN a nástroje podpory", "items": ["forticlient", "rustdesk"] }
+  ],
+
+  "excludeFolders": [
+    { "path": "Office20*", "reason": "osobní instalátory Office vázané na konkrétního uživatele nebo PC – instaluje IT ručně" },
+    { "path": "SOLIDWORKS*", "reason": "licencovaný CAD – instaluje IT ručně" },
+    { "path": "BIOS*", "reason": "aktualizace BIOSu konkrétního modelu" },
+    { "path": "*Portable*", "reason": "přenosné verze – neinstalují se" },
+    { "path": "totalcmd", "reason": "rozbalený program, ne instalátor" },
+    { "path": "ComArrSped", "reason": "rozbalená aplikace ComArr, ne instalátor" },
+    { "path": "MyWAC/LocalClient", "reason": "soubory klienta MyWAC, ne instalátor" },
+    { "path": "Crystal Report Runtime/*", "reason": "plné verze Crystal Reports (ne runtime) – instaluje IT ručně" },
+    { "path": "Mozilla_IB01", "reason": "zastaralé verze (Firefox 70, Flash Player)" },
+    { "path": "TeamViewer/win7", "reason": "verze pro Windows 7" },
+    { "path": "TeamViewer/schelling", "reason": "TeamViewer jiné firmy" },
+    { "path": "TeamViewer/TeamViewer_MSI32", "reason": "32bitová verze" },
+    { "path": "TeamViewer/custom_alfun/260708", "reason": "archivy a rozpracovaná konfigurace TeamVieweru" },
+    { "path": "MS Teams/pers", "reason": "klasické Teams pro osobní účet" },
+    { "path": "SophosInstall/uninstall", "reason": "nástroje pro odinstalaci Sophosu" },
+    { "path": "AI", "reason": "doplňky prohlížeče a online instalátory AI nástrojů" }
+  ],
+
+  "excludeFiles": [
+    { "path": "*Zap*", "reason": "nástroj pro ODINSTALACI Sophosu – Sophos z počítače odebere", "risk": "err" },
+    { "path": "SophosInstall/*server*", "reason": "instalátor Sophos pro servery", "risk": "err" },
+    { "path": "*mac*.zip", "reason": "instalátor pro macOS", "risk": "warn" },
+    { "path": "*Portable*", "reason": "přenosná verze – neinstaluje se", "risk": "warn" },
+    { "path": "*QS*", "reason": "TeamViewer QuickSupport – jiná varianta než firemní", "risk": "warn" },
+    { "path": "TeamViewer/custom_alfun/Host/*", "reason": "TeamViewer Host – jiná varianta než firemní", "risk": "warn" },
+    { "path": "TeamViewer/custom_alfun/TeamViewer_Host_Setup.exe", "reason": "TeamViewer Host – jiná varianta než firemní", "risk": "warn" },
+    { "path": "TeamViewer/TeamViewer_MSI64/Host/*", "reason": "TeamViewer Host – jiná varianta než firemní", "risk": "warn" },
+    { "path": "*uninstall*", "reason": "odinstalační nástroj", "risk": "err" },
+    { "path": "*helppack*", "reason": "jazykový balíček nápovědy, ne program", "risk": "warn" },
+    { "path": "*langpack*", "reason": "jazykový balíček, ne program", "risk": "warn" },
+    { "path": "acrobatDC/Reader_*_install.exe", "reason": "online instalátor Acrobat Reader v jiném jazyce (maďarština) – použije se winget", "risk": "warn" },
+    { "path": "FortiClient/*Online*", "reason": "online instalátor – potřebuje internet a starou verzi serveru", "risk": "warn" },
+    { "path": "MS Teams/Teams_windows*", "reason": "klasické Teams – nahrazeno novými Teams", "risk": "warn" },
+    { "path": "MS Teams/MicrosoftTeams-x64-win11.msix", "reason": "starší balíček Teams pro Windows 11", "risk": "warn" },
+    { "path": "*flash_player*", "reason": "Flash Player – nepodporovaný, bezpečnostní riziko", "risk": "err" },
+    { "path": "TeamViewer14_*", "reason": "TeamViewer 14 – zastaralá verze", "risk": "warn" },
+    { "path": "TeamViewer_Setup.exe", "reason": "TeamViewer z roku 2020 – zastaralá verze", "risk": "warn" }
+  ],
+
+  "items": [
+    {
+      "id": "sophos", "name": "Sophos Endpoint", "category": "zaklad", "required": true, "type": "sophos",
+      "match": "^SophosInstall/Sophos(Setup|SetupEndpointWindows)[^/]*\\.exe$",
+      "rank": ["SophosSetup_new.exe"],
+      "args": { "exe": "--quiet" },
+      "sources": ["nas"], "scope": "machine",
+      "why": "Bezpečnostní agent běží jako služba pro celý počítač.",
+      "detect": "^Sophos (Endpoint|Intercept)"
+    },
+    {
+      "id": "font-code128", "name": "Písmo Code128", "category": "zaklad", "required": true, "type": "font",
+      "match": "^([^/]+/){0,2}code128\\.ttf$",
+      "sources": ["nas"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny: tisk štítků používají i jiné účty a tiskové služby. Jen pro uživatele písmo ostatní neuvidí."
+    },
+    {
+      "id": "chrome", "name": "Google Chrome", "category": "zaklad", "required": true,
+      "match": "^Chrome/ChromeSetup\\.exe$", "nasNeedsInternet": true,
+      "args": { "exe": "/silent /install" },
+      "winget": "Google.Chrome", "sources": ["winget", "nas"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny. Na NAS je jen online instalátor, proto se bere z winget.",
+      "detect": "^Google Chrome$", "closeProcesses": ["chrome"], "shortcut": "^Google Chrome$"
+    },
+    {
+      "id": "7zip", "name": "7-Zip", "category": "zaklad", "required": true,
+      "match": "^7z\\d{4}-x64\\.(msi|exe)$", "versionRegex": "^7z(\\d{2})(\\d{2})", "versionFormat": "$1.$2",
+      "prefer": ["msi", "exe"], "args": { "exe": "/S" },
+      "winget": "7zip.7zip", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instalátor 7-Zip instaluje jen pro celý počítač.",
+      "detect": "^7-Zip", "closeProcesses": ["7zFM"]
+    },
+    {
+      "id": "anydesk", "name": "AnyDesk", "category": "zaklad", "required": true,
+      "match": "^AnyDesk\\.exe$",
+      "args": { "exe": "--install \"%ProgramFiles(x86)%\\AnyDesk\" --start-with-win --silent --create-shortcuts --create-desktop-icon" },
+      "winget": "AnyDesk.AnyDesk", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Vzdálená podpora běží jako služba pro celý počítač.",
+      "detect": "^AnyDesk"
+    },
+    {
+      "id": "teamviewer", "name": "TeamViewer", "category": "zaklad", "required": true,
+      "match": "^TeamViewer/(custom_alfun/Full/|TeamViewer_MSI64/Full/)?TeamViewer_(Full|Setup_x64)\\.(msi|exe)$",
+      "rank": ["custom_alfun/Full/", "TeamViewer_MSI64/Full/"], "prefer": ["msi", "exe"],
+      "args": { "exe": "/S" },
+      "winget": "TeamViewer.TeamViewer", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Vzdálená podpora běží jako služba pro celý počítač. Firemní verze (custom_alfun) má přednost.",
+      "detect": "^TeamViewer", "closeProcesses": ["TeamViewer"]
+    },
+
+    {
+      "id": "m365", "name": "Microsoft 365 Apps", "category": "ms365", "type": "office",
+      "match": "^Office 365/OfficeSetup\\.exe$", "nasInteractive": true,
+      "winget": "Microsoft.Office", "sources": ["winget", "nas"], "scope": "machine",
+      "why": "Click-to-Run se instaluje pro celý počítač, každý uživatel se pak přihlásí svým účtem. Z internetu se nainstaluje tiše bez Teams, Access a Publisheru; instalátor z NAS má vlastní okno.",
+      "detect": "^Microsoft (365|Office 365)", "closeProcesses": ["WINWORD", "EXCEL", "POWERPNT", "OUTLOOK"],
+      "notes": "Po instalaci se uživatel přihlásí účtem s předplatným."
+    },
+    {
+      "id": "teams", "name": "Microsoft Teams", "category": "ms365", "type": "msix",
+      "match": "^MS Teams/NEW/MSTeams-x64\\.msix$",
+      "winget": "Microsoft.Teams", "sources": ["nas", "winget"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny: balíček se zřídí pro každého uživatele, který se na PC přihlásí.",
+      "detectAppx": "MSTeams"
+    },
+    {
+      "id": "onedrive", "name": "Microsoft OneDrive", "category": "ms365",
+      "winget": "Microsoft.OneDrive", "sources": ["winget"], "scope": "both", "recommended": "user",
+      "why": "Doporučeno pro uživatele: OneDrive se standardně instaluje do profilu a sám se aktualizuje.",
+      "detect": "^Microsoft OneDrive"
+    },
+
+    {
+      "id": "libreoffice", "name": "LibreOffice", "category": "kancelar",
+      "match": "^Libre Office/LibreOffice_[\\d.]+_Win_x86-64\\.msi$", "versionRegex": "LibreOffice_([\\d.]+)_",
+      "args": { "msi": "CREATEDESKTOPLINK=0 REGISTER_ALL_MSO_TYPES=0 ISCHECKFORPRODUCTUPDATES=0 RebootYesNo=No" },
+      "winget": "TheDocumentFoundation.LibreOffice", "sources": ["nas", "winget"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny: sdílený počítač, jedna kopie.",
+      "detect": "^LibreOffice", "closeProcesses": ["soffice", "soffice.bin"]
+    },
+    {
+      "id": "onlyoffice", "name": "ONLYOFFICE Desktop", "category": "kancelar",
+      "match": "^OnlyOffice/DesktopEditors_x64\\.(msi|exe)$", "prefer": ["msi", "exe"],
+      "winget": "ONLYOFFICE.DesktopEditors", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.",
+      "detect": "^ONLYOFFICE"
+    },
+    {
+      "id": "acrobat", "name": "Adobe Acrobat Reader", "category": "kancelar",
+      "winget": "Adobe.Acrobat.Reader.64-bit", "sources": ["winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač. Na NAS je jen maďarský online instalátor.",
+      "detect": "^Adobe Acrobat", "shortcut": "^Adobe Acrobat"
+    },
+    {
+      "id": "firefox", "name": "Mozilla Firefox", "category": "kancelar",
+      "match": "^Firefox Installer\\.exe$", "nasNeedsInternet": true, "args": { "exe": "/S" },
+      "winget": "Mozilla.Firefox", "sources": ["winget", "nas"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny. Na NAS je jen online instalátor, proto se bere z winget.",
+      "detect": "^Mozilla Firefox", "closeProcesses": ["firefox"], "shortcut": "^Firefox$"
+    },
+    {
+      "id": "thunderbird", "name": "Mozilla Thunderbird", "category": "kancelar",
+      "match": "^Thunderbird Setup [\\d.]+\\.exe$", "versionRegex": "Setup ([\\d.]+)\\.exe$", "args": { "exe": "/S" },
+      "winget": "Mozilla.Thunderbird", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.",
+      "detect": "^Mozilla Thunderbird", "closeProcesses": ["thunderbird"], "shortcut": "^Thunderbird$"
+    },
+    {
+      "id": "emclient", "name": "eM Client", "category": "kancelar",
+      "match": "^emclient-v[\\d.]+\\.msi$",
+      "winget": "eMClient.eMClient", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.",
+      "detect": "^eM Client", "closeProcesses": ["MailClient"]
+    },
+
+    {
+      "id": "irfanview", "name": "IrfanView", "category": "grafika",
+      "match": "^iview\\d+_x64_setup\\.exe$", "versionRegex": "^iview(\\d)(\\d+)", "versionFormat": "$1.$2",
+      "args": { "exe": "/silent /allusers=1 /group=1 /desktop=1 /assoc=1" },
+      "winget": "IrfanSkiljan.IrfanView", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.",
+      "detect": "^IrfanView"
+    },
+    {
+      "id": "inkscape", "name": "Inkscape", "category": "grafika",
+      "match": "^inkscape-[\\d.]+_.*-x64\\.(exe|msi)$", "versionRegex": "^inkscape-([\\d.]+)_", "prefer": ["msi", "exe"],
+      "args": { "exe": "/S /allusers" },
+      "winget": "Inkscape.Inkscape", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.",
+      "detect": "^Inkscape"
+    },
+    {
+      "id": "obs", "name": "OBS Studio", "category": "grafika",
+      "match": "^OBS-Studio-[\\d.]+-Full-Installer-x64\\.exe$", "versionRegex": "OBS-Studio-([\\d.]+)-", "args": { "exe": "/S" },
+      "winget": "OBSProject.OBSStudio", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje ovladač virtuální kamery pro celý počítač.",
+      "detect": "^OBS Studio", "closeProcesses": ["obs64"]
+    },
+    {
+      "id": "vlc", "name": "VLC media player", "category": "grafika",
+      "winget": "VideoLAN.VLC", "sources": ["winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.", "detect": "^VLC media player"
+    },
+
+    {
+      "id": "forticlient", "name": "FortiClient VPN", "category": "sprava",
+      "match": "^FortiClient/[^/]+/F[^/]*\\.msi$",
+      "args": { "msi": "REBOOT=ReallySuppress" },
+      "winget": "Fortinet.FortiClientVPN", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "VPN klient instaluje síťový ovladač pro celý počítač.",
+      "detect": "^FortiClient", "trustCertificates": true
+    },
+    {
+      "id": "rustdesk", "name": "RustDesk", "category": "sprava",
+      "match": "^Rust Desk/rustdesk-[^/]*\\.exe$", "keepFileName": true, "args": { "exe": "--silent-install" },
+      "sources": ["nas"], "scope": "machine",
+      "why": "Vzdálená podpora běží jako služba. Konfigurace firemního serveru je zakódovaná v názvu souboru, proto se bere jen z NAS.",
+      "detect": "^RustDesk"
+    },
+    {
+      "id": "revo", "name": "Revo Uninstaller", "category": "sprava",
+      "match": "^revosetup\\.exe$", "args": { "exe": "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-" },
+      "winget": "RevoUninstaller.RevoUninstaller", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.", "detect": "^Revo Uninstaller"
+    },
+    {
+      "id": "keepassxc", "name": "KeePassXC", "category": "sprava",
+      "match": "^2FA desktop/KeePassXC-[\\d.]+-Win64\\.msi$", "versionRegex": "KeePassXC-([\\d.]+)-",
+      "winget": "KeePassXCTeam.KeePassXC", "sources": ["nas", "winget"], "scope": "both", "recommended": "all",
+      "why": "Doporučeno pro všechny; databázi hesel má každý uživatel stejně svou.",
+      "detect": "^KeePassXC"
+    },
+    {
+      "id": "stickypassword", "name": "Sticky Password", "category": "sprava",
+      "match": "^StickyPassword/StickyPassword[^/]*\\.exe$",
+      "sources": ["nas"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.", "detect": "^Sticky Password"
+    },
+    {
+      "id": "totalcmd", "name": "Total Commander", "category": "sprava",
+      "match": "^(totalcmd_install/)?tcmd\\d{4}x(32_)?64\\.exe$", "versionRegex": "tcmd(\\d{2})(\\d{2})", "versionFormat": "$1.$2",
+      "args": { "exe": "/AHMGDU" },
+      "winget": "Ghisler.TotalCommander", "sources": ["nas", "winget"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.", "detect": "^Total Commander"
+    },
+    { "id": "winscp", "name": "WinSCP", "category": "sprava", "winget": "WinSCP.WinSCP", "sources": ["winget"], "scope": "both", "recommended": "all", "why": "Doporučeno pro všechny.", "detect": "^WinSCP" },
+    { "id": "putty", "name": "PuTTY", "category": "sprava", "winget": "PuTTY.PuTTY", "sources": ["winget"], "scope": "machine", "why": "Instaluje se pro celý počítač.", "detect": "^PuTTY" },
+    { "id": "wireshark", "name": "Wireshark", "category": "sprava", "winget": "WiresharkFoundation.Wireshark", "sources": ["winget"], "scope": "machine", "why": "Instaluje ovladač pro zachytávání provozu pro celý počítač.", "detect": "^Wireshark" },
+    { "id": "powertoys", "name": "Microsoft PowerToys", "category": "sprava", "winget": "Microsoft.PowerToys", "sources": ["winget"], "scope": "both", "recommended": "user", "why": "Doporučeno pro uživatele: tak to doporučuje Microsoft, aktualizuje se samo bez práv správce.", "detect": "^PowerToys" },
+
+    {
+      "id": "crystal", "name": "Crystal Reports Runtime", "category": "technicke",
+      "match": "^Crystal Report Runtime/[^/]*\\.msi$",
+      "sources": ["nas"], "scope": "machine", "pin": true,
+      "why": "Runtime pro celý počítač. Aplikace bývají vázané na konkrétní verzi – ověřte požadavek aplikace.",
+      "detect": "Crystal Reports"
+    },
+    {
+      "id": "edrawings", "name": "eDrawings Viewer", "category": "technicke",
+      "match": "^edrawings/eDrawings[^/]*\\.exe$", "interactive": true,
+      "sources": ["nas"], "scope": "machine",
+      "why": "Instalátor neumí ověřenou tichou instalaci – otevře vlastní okno.", "detect": "^eDrawings"
+    },
+    {
+      "id": "trueview", "name": "Autodesk DWG TrueView", "category": "technicke",
+      "match": "^TrueView/[^/]*\\.exe$", "interactive": true,
+      "sources": ["nas"], "scope": "machine",
+      "why": "Balíček Autodesk se nejdřív rozbalí a pak se instaluje v okně instalátoru.", "detect": "DWG TrueView"
+    },
+    {
+      "id": "dwgsee", "name": "DWGSee Pro", "category": "technicke",
+      "match": "^DWG/DWGSeePro\\d+\\.exe$", "versionRegex": "DWGSeePro(\\d+)",
+      "sources": ["nas"], "scope": "machine",
+      "why": "Instaluje se pro celý počítač.", "detect": "^DWGSee"
+    },
+    {
+      "id": "bentley", "name": "Bentley View", "category": "technicke",
+      "match": "^Bently View/Setup_View[^/]*\\.exe$", "versionRegex": "_([\\d.]+)\\.exe$", "interactive": true,
+      "sources": ["nas"], "scope": "machine",
+      "why": "Instalátor Bentley stahuje součásti a otevře vlastní okno.", "detect": "^Bentley View"
+    },
+
+    {
+      "id": "comarr", "name": "ComArr Sped", "category": "firemni",
+      "match": "^comarr-[^/]*\\.exe$", "interactive": true,
+      "sources": ["nas"], "scope": "machine",
+      "why": "Firemní aplikace – instalátor má vlastní průvodce.", "detect": "ComArr"
+    },
+    {
+      "id": "mywac", "name": "MyWAC", "category": "firemni",
+      "match": "^MyWAC/mywac[^/]*\\.msi$",
+      "sources": ["nas"], "scope": "machine",
+      "why": "Firemní aplikace pro celý počítač.", "detect": "MyWAC"
+    },
+    {
+      "id": "eid-sk", "name": "eID klient (SK)", "category": "firemni",
+      "match": "^SK/eID_klient\\.msi$",
+      "sources": ["nas"], "scope": "machine",
+      "why": "Slovenský elektronický občanský průkaz – ovladače čtečky pro celý počítač.", "detect": "eID klient"
+    },
+
+    { "id": "notepadpp", "name": "Notepad++", "category": "vyvoj", "winget": "Notepad++.Notepad++", "sources": ["winget"], "scope": "machine", "why": "Instaluje se pro celý počítač.", "detect": "^Notepad\\+\\+" },
+    { "id": "git", "name": "Git", "category": "vyvoj", "winget": "Git.Git", "sources": ["winget"], "scope": "machine", "why": "Doporučeno pro všechny; nástroje sestavení ho hledají v Program Files.", "detect": "^Git( version|$)" },
+    { "id": "vscode", "name": "Visual Studio Code", "category": "vyvoj", "winget": "Microsoft.VisualStudioCode", "sources": ["winget"], "scope": "both", "recommended": "user", "why": "Doporučeno pro uživatele: tak to doporučuje Microsoft, aktualizuje se samo bez práv správce.", "detect": "^Microsoft Visual Studio Code" }
+  ]
+}

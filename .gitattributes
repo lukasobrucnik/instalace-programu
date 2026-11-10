@@ -1,0 +1,3 @@
+# Soubory ukládat přesně tak, jak jsou (UTF-8 s BOM u .ps1/.psm1, CRLF u .cmd) – jinak by PowerShell 5.1 / cmd nefungovaly
+* -text
+*.ico binary

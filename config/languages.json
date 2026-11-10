@@ -1,0 +1,19 @@
+﻿{
+  "_comment": "Jazyky a regiony firmy. keyboards = rozložení klávesnice (jazyk:rozložení), první je výchozí. secondaryLanguages = přidají se každému uživateli jako druhý jazyk (klávesnice). regions = návrh jazyka podle země uživatele v AD (atribut c). languagePackRoot = složka na NAS s jazykovými balíčky Windows (*.cab), prohledává se včetně podsložek.",
+  "defaultLanguage": "cs-CZ",
+  "secondaryLanguages": ["en-US"],
+  "languagePackRoot": "\\\\FS01\\backup\\IT\\Programy\\_SW\\_Jazyky",
+  "languages": [
+    { "id": "cs-CZ", "name": "Čeština (Česko)",        "ui": "cs-CZ", "culture": "cs-CZ", "geoId": 75,  "keyboards": ["0405:00000405"], "systemLocale": "cs-CZ", "timeZone": "Central Europe Standard Time" },
+    { "id": "sk-SK", "name": "Slovenčina (Slovensko)", "ui": "sk-SK", "culture": "sk-SK", "geoId": 143, "keyboards": ["041B:0000041B"], "systemLocale": "sk-SK", "timeZone": "Central Europe Standard Time" },
+    { "id": "de-DE", "name": "Deutsch (Deutschland)",  "ui": "de-DE", "culture": "de-DE", "geoId": 94,  "keyboards": ["0407:00000407"], "systemLocale": "de-DE", "timeZone": "W. Europe Standard Time" },
+    { "id": "de-AT", "name": "Deutsch (Österreich)",   "ui": "de-DE", "culture": "de-AT", "geoId": 14,  "keyboards": ["0C07:00000407"], "systemLocale": "de-AT", "timeZone": "W. Europe Standard Time" },
+    { "id": "pl-PL", "name": "Polski (Polska)",        "ui": "pl-PL", "culture": "pl-PL", "geoId": 191, "keyboards": ["0415:00000415"], "systemLocale": "pl-PL", "timeZone": "Central European Standard Time" },
+    { "id": "hu-HU", "name": "Magyar (Magyarország)",  "ui": "hu-HU", "culture": "hu-HU", "geoId": 109, "keyboards": ["040E:0000040E"], "systemLocale": "hu-HU", "timeZone": "Central Europe Standard Time" },
+    { "id": "ro-RO", "name": "Română (România)",       "ui": "ro-RO", "culture": "ro-RO", "geoId": 200, "keyboards": ["0418:00010418"], "systemLocale": "ro-RO", "timeZone": "GTB Standard Time" },
+    { "id": "uk-UA", "name": "Українська (Україна)",   "ui": "uk-UA", "culture": "uk-UA", "geoId": 241, "keyboards": ["0422:00020422"], "systemLocale": "uk-UA", "timeZone": "FLE Standard Time" },
+    { "id": "en-GB", "name": "English (United Kingdom)", "ui": "en-GB", "culture": "en-GB", "geoId": 242, "keyboards": ["0809:00000809"], "systemLocale": "en-GB", "timeZone": "GMT Standard Time" },
+    { "id": "en-US", "name": "English (United States)",  "ui": "en-US", "culture": "en-US", "geoId": 244, "keyboards": ["0409:00000409"], "systemLocale": "en-US", "timeZone": "" }
+  ],
+  "regions": { "CZ": "cs-CZ", "SK": "sk-SK", "DE": "de-DE", "AT": "de-AT", "PL": "pl-PL", "HU": "hu-HU", "RO": "ro-RO", "UA": "uk-UA", "GB": "en-GB", "US": "en-US" }
+}

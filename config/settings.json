@@ -1,0 +1,23 @@
+﻿{
+  "sourceRoots": ["\\\\FS01\\backup\\IT\\Programy\\_SW"],
+  "deployPath": "\\\\FS01\\backup\\IT\\Programy\\_IT\\ProgramInstalace\\v3",
+  "dataDirectory": "%ProgramData%\\InstalaceProgramu",
+  "appDirectory": "%ProgramFiles%\\InstalaceProgramu",
+  "brokerTaskName": "InstalaceProgramu-Broker",
+  "centralLogDirectory": "",
+  "scanDepth": 4,
+  "nasProbeSeconds": 4,
+  "nasSlowMs": 500,
+  "internetProbeUrl": "https://cdn.winget.microsoft.com/cache/source.msix",
+  "internetProbeSeconds": 6,
+  "internetSlowMs": 2500,
+  "silentTimeoutMinutes": 40,
+  "interactiveTimeoutMinutes": 120,
+  "dialogWatchSeconds": 25,
+  "minFreeGb": 5,
+  "blockFreeGb": 1,
+  "sophosMaxAgeDays": 90,
+  "officeProductId": "O365BusinessRetail",
+  "languageForAll": true,
+  "profileDeleteForAll": false
+}
