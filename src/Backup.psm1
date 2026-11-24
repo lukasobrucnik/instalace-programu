@@ -557,6 +557,79 @@ function Get-IpFirefoxDefaultProfile {
     return ''
 }
 
+function Read-IpIni {
+    # INI (profiles.ini / installs.ini Firefoxu) -> [ordered] sekce -> [ordered] klíč=hodnota
+    param([string] $Path)
+    $s = [ordered]@{}; $cur = $null
+    if (-not [IO.File]::Exists($Path)) { return $s }
+    foreach ($l in [IO.File]::ReadAllLines($Path)) {
+        $t = $l.Trim()
+        if ($t -match '^\[(.+)\]$') { $cur = [ordered]@{}; $s[$Matches[1]] = $cur; continue }
+        if ($null -ne $cur -and $t -match '^([^=;#]+)=(.*)$') { $cur[$Matches[1].Trim()] = $Matches[2] }
+    }
+    return $s
+}
+
+function Write-IpIni { param([string] $Path, $Sections)
+    $sb = New-Object Text.StringBuilder
+    foreach ($k in $Sections.Keys) {
+        [void]$sb.Append("[$k]`r`n")
+        foreach ($x in $Sections[$k].Keys) { [void]$sb.Append("$x=$($Sections[$k][$x])`r`n") }
+        [void]$sb.Append("`r`n")
+    }
+    [IO.File]::WriteAllText($Path, $sb.ToString(), $script:Utf8)
+}
+
+function Get-IpFirefoxInstallHashes {
+    # Identifikátory instalací Firefoxu na TOMTO PC (z installs.ini / [InstallXXXX] v profiles.ini).
+    # Firefox podle nich (hash cesty instalace) vybírá profil – po obnově z jiného PC by jinak založil nový prázdný.
+    param([string] $Root)
+    $h = New-Object System.Collections.Generic.List[string]
+    foreach ($k in (Read-IpIni (Join-Path $Root 'installs.ini')).Keys) { if ($k -match '^[0-9A-Fa-f]{8,}$' -and -not $h.Contains($k)) { $h.Add($k) } }
+    foreach ($k in (Read-IpIni (Join-Path $Root 'profiles.ini')).Keys) { if ($k -match '^Install([0-9A-Fa-f]{8,})$' -and -not $h.Contains($Matches[1])) { $h.Add($Matches[1]) } }
+    return $h.ToArray()
+}
+
+function Repair-IpFirefoxProfiles {
+    <#
+    .SYNOPSIS
+        Po obnově: obnovený profil Firefoxu nastaví jako výchozí a přiřadí ho instalacím Firefoxu na tomto PC.
+        Bez známé instalace odstraní vazby na instalace z původního PC – Firefox pak výchozí profil převezme sám.
+        Vrací cestu profilu (Profiles/xxxx.default-release), nebo ''.
+    #>
+    param([Parameter(Mandatory)] [string] $Root, [string[]] $KeepHashes = @())
+    $pf = Join-Path $Root 'profiles.ini'
+    $ini = Read-IpIni $pf
+    $profs = @($ini.Keys | Where-Object { $_ -match '^Profile\d+$' -and $ini[$_]['Path'] })
+    if (-not $profs.Count) { return '' }
+    $full = { param($sec) $p = [string]$ini[$sec]['Path']; if ([string]$ini[$sec]['IsRelative'] -ne '0') { Join-Path $Root ($p -replace '/', '\') } else { $p } }
+    $alive = { param($sec) $f = & $full $sec; (Test-Path -LiteralPath (Join-Path $f 'prefs.js')) -or (Test-Path -LiteralPath (Join-Path $f 'places.sqlite')) }
+    # který profil: ten, který uživatel používal (installs.ini / [Install] zálohy), pak Default=1, pak největší places.sqlite
+    $cands = New-Object System.Collections.Generic.List[string]
+    foreach ($v in (Read-IpIni (Join-Path $Root 'installs.ini')).Values) { if ($v['Default']) { $cands.Add([string]$v['Default']) } }
+    foreach ($k in $ini.Keys) { if ($k -like 'Install*' -and $ini[$k]['Default']) { $cands.Add([string]$ini[$k]['Default']) } }
+    foreach ($k in $profs) { if ([string]$ini[$k]['Default'] -eq '1') { $cands.Add([string]$ini[$k]['Path']) } }
+    $pick = $null
+    foreach ($c in $cands) { $sec = @($profs | Where-Object { [string]$ini[$_]['Path'] -eq $c })[0]; if ($sec -and (& $alive $sec)) { $pick = $sec; break } }
+    if (-not $pick) {
+        $pick = @($profs | Sort-Object { $s = Join-Path (& $full $_) 'places.sqlite'; if (Test-Path -LiteralPath $s) { - (Get-Item -LiteralPath $s).Length } else { 0 } })[0]
+    }
+    $rel = [string]$ini[$pick]['Path']
+    $out = [ordered]@{}
+    foreach ($k in $ini.Keys) {
+        if ($k -like 'Install*') { continue }
+        $sec = $ini[$k]
+        if ($k -match '^Profile\d+$') { if ($k -eq $pick) { $sec['Default'] = '1' } elseif ($sec.Contains('Default')) { $sec.Remove('Default') } }
+        $out[$k] = $sec
+    }
+    foreach ($h in $KeepHashes) { $out["Install$h"] = [ordered]@{ Default = $rel; Locked = '1' } }
+    Write-IpIni $pf $out
+    $inst = Join-Path $Root 'installs.ini'
+    if ($KeepHashes.Count) { $i = [ordered]@{}; foreach ($h in $KeepHashes) { $i[$h] = [ordered]@{ Default = $rel; Locked = '1' } }; Write-IpIni $inst $i }
+    elseif ([IO.File]::Exists($inst)) { [IO.File]::Delete($inst) }
+    return $rel
+}
+
 function Rename-IpAside {
     # Stávající soubor / složku odloží vedle sebe (*.pred-obnovou-<datum>). Vrací nový název, nebo ''.
     param([Parameter(Mandatory)] [string] $Path)
@@ -632,10 +705,19 @@ function Invoke-IpUserRestore {
                     if (@(Get-IpRunningBrowsers -Sid $u.Sid -Ids @($id)).Count) { throw "$($def.Name) je u uživatele spuštěný – zavřete ho a obnovte znovu" }
                     $dst = Join-Path $u.ProfilePath $def.Rel
                     if ($mode -eq 'full') {
+                        # Firefox: zapamatovat instalace Firefoxu na tomto PC dřív, než se původní data odloží
+                        $ffHashes = if ($def.Kind -eq 'firefox') { @(Get-IpFirefoxInstallHashes -Root $dst) } else { @() }
                         $aside = Rename-IpAside -Path $dst
                         if ($aside) { $note = "původní profil odložen jako $aside" }
                         New-Item -ItemType Directory -Path $dst -Force | Out-Null
                         $rc = Invoke-IpRobocopy -Source $src -Dest $dst -Options (Get-IpCopyOptions) -LogFile $logFile -OnProgress $onp -State $State
+                        if ($def.Kind -eq 'firefox' -and -not $rc.Cancelled) {
+                            try {
+                                $rel = Repair-IpFirefoxProfiles -Root $dst -KeepHashes $ffHashes
+                                if ($rel) { $note = (@($note, "výchozí profil $rel – Firefox ho na tomto PC použije$(if ($ffHashes.Count) { ' (přiřazen k instalaci Firefoxu)' } else { ' (převezme ho při prvním spuštění)' })") | Where-Object { $_ }) -join ' · ' }
+                            }
+                            catch { $note = (@($note, "profiles.ini nejde upravit ($($_.Exception.Message)) – kdyby Firefox ukázal prázdný profil, vyberte obnovený v about:profiles") | Where-Object { $_ }) -join ' · ' }
+                        }
                         if ($def.Kind -eq 'chromium' -and -not $sameAccount) { $note = (@($note, 'jiný účet než v záloze – uložená hesla nepůjdou přečíst (přeneste je synchronizací nebo exportem CSV)') | Where-Object { $_ }) -join ' · ' }
                         elseif ($def.Kind -eq 'chromium' -and -not $dp) { $note = (@($note, 'v záloze chybí klíče DPAPI – uložená hesla nemusí jít přečíst') | Where-Object { $_ }) -join ' · ' }
                     }
@@ -643,8 +725,10 @@ function Invoke-IpUserRestore {
                         $tp = if (Test-Path -LiteralPath $dst) { Get-IpFirefoxDefaultProfile -Root $dst } else { '' }
                         if (-not $tp) {
                             # Firefox tu ještě nebyl: stačí nakopírovat záložky i se seznamem profilů
+                            $ffHashes = if (Test-Path -LiteralPath $dst) { @(Get-IpFirefoxInstallHashes -Root $dst) } else { @() }
                             New-Item -ItemType Directory -Path $dst -Force | Out-Null
                             $rc = Invoke-IpRobocopy -Source $src -Dest $dst -Options (Get-IpCopyOptions) -LogFile $logFile -OnProgress $onp -State $State
+                            if (-not $rc.Cancelled) { try { $rel = Repair-IpFirefoxProfiles -Root $dst -KeepHashes $ffHashes; if ($rel) { $note = "výchozí profil $rel" } } catch { } }
                         }
                         else {
                             $sp = Get-IpFirefoxDefaultProfile -Root $src

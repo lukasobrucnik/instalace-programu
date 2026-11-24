@@ -1670,6 +1670,62 @@ function Show-IpBkConfirm {
     return $w.Tag
 }
 
+# Export / import hesel pro každý prohlížeč (adresa se vloží do adresního řádku prohlížeče).
+$script:PwGuide = @(
+    [pscustomobject]@{ Id = 'chrome'; Name = 'Google Chrome'; Exe = 'chrome.exe'; ExportUrl = 'chrome://password-manager/settings'; Export = 'Exportovat hesla → Stáhnout soubor → uložit na Plochu (např. hesla-chrome.csv)'; ImportUrl = 'chrome://password-manager/settings'; Import = 'Importovat hesla → Vybrat soubor → CSV z Plochy' }
+    [pscustomobject]@{ Id = 'edge'; Name = 'Microsoft Edge'; Exe = 'msedge.exe'; ExportUrl = 'edge://settings/passwords'; Export = '⋯ (Další akce) u Uložená hesla → Exportovat hesla → uložit na Plochu (hesla-edge.csv)'; ImportUrl = 'edge://settings/importData'; Import = 'Importovat z: Soubor s hesly (CSV) → vybrat soubor z Plochy' }
+    [pscustomobject]@{ Id = 'brave'; Name = 'Brave'; Exe = 'brave.exe'; ExportUrl = 'brave://password-manager/settings'; Export = 'Exportovat hesla → Stáhnout soubor → uložit na Plochu (hesla-brave.csv)'; ImportUrl = 'brave://password-manager/settings'; Import = 'Importovat hesla → Vybrat soubor → CSV z Plochy' }
+    [pscustomobject]@{ Id = 'opera'; Name = 'Opera'; Exe = 'opera.exe'; ExportUrl = 'opera://settings/passwords'; Export = '⋮ u Uložená hesla → Exportovat hesla → uložit na Plochu (hesla-opera.csv)'; ImportUrl = 'opera://settings/passwords'; Import = '⋮ u Uložená hesla → Importovat → CSV z Plochy' }
+    [pscustomobject]@{ Id = 'firefox'; Name = 'Mozilla Firefox'; Exe = 'firefox.exe'; ExportUrl = 'about:logins'; Export = '⋯ (vpravo nahoře) → Exportovat hesla → uložit na Plochu (hesla-firefox.csv)'; ImportUrl = 'about:logins'; Import = '⋯ (vpravo nahoře) → Importovat ze souboru → CSV z Plochy' }
+)
+
+function Find-IpBrowserExe { param([string] $Exe)
+    # Cesta k prohlížeči z registru App Paths (Windows 10 i 11; instalace pro všechny i jen pro uživatele).
+    foreach ($root in 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths') {
+        try { $v = [string](Get-ItemProperty -LiteralPath "$root\$Exe" -ErrorAction Stop).'(default)'; $v = $v.Trim('"'); if ($v -and (Test-Path -LiteralPath $v)) { return $v } } catch { }
+    }
+    return ''
+}
+
+function New-IpPwGuide {
+    # Návod na export (před zálohou) nebo import (po obnově) hesel pro prohlížeče uživatele.
+    param([string[]] $Ids, [ValidateSet('export', 'import')] [string] $Mode, [bool] $CanOpen, [string] $Margin = '0')
+    $p = New-IpPanel -Margin '14,12,14,12'
+    if ($Mode -eq 'export') {
+        [void]$p.Children.Add((New-IpText 'Hesla prohlížečů – export do CSV (doporučeno)' 15 'Bold' $script:Col.Warn))
+        [void]$p.Children.Add((New-IpText 'Hesla Chrome / Edge / Brave / Opera šifruje Windows klíčem účtu. Záloha celého profilu je přenese jen do STEJNÉHO doménového účtu a ani tam to není zaručené – novější verze prohlížečů vážou šifrování i na počítač. Jistá cesta pro všechny prohlížeče: PŘED zálohou exportovat hesla do souboru CSV na Plochu uživatele. Záloha ho vezme s sebou a na novém PC se hesla naimportují (karta Obnovit ze zálohy). Firefox přenese hesla i se zálohou profilu – export je u něj jen pojistka.' 13 'Normal' '' -Wrap -Margin '0,4,0,8'))
+        [void]$p.Children.Add((New-IpText 'Export dělá uživatel ve svém prohlížeči (prohlížeč si může vyžádat heslo / PIN Windows). Adresu vložte do adresního řádku prohlížeče.' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '0,0,0,6'))
+    }
+    else {
+        [void]$p.Children.Add((New-IpText 'Hesla prohlížečů – import z CSV' 15 'Bold' $script:Col.Accent))
+        [void]$p.Children.Add((New-IpText 'Pokud uživatel před zálohou exportoval hesla do CSV (na Plochu), po obnovení Plochy je naimportujte – uživatel ve svém prohlížeči na tomto PC. Platí i když se hesla z profilu nepřenesla (jiný účet, novější prohlížeč).' 13 'Normal' '' -Wrap -Margin '0,4,0,8'))
+    }
+    foreach ($g in @($script:PwGuide | Where-Object { $Ids -contains $_.Id })) {
+        $url = if ($Mode -eq 'export') { $g.ExportUrl } else { $g.ImportUrl }
+        $how = if ($Mode -eq 'export') { $g.Export } else { $g.Import }
+        $row = New-Object Windows.Controls.Grid; $row.Margin = '0,5,0,5'
+        foreach ($wd in @('150', '*', 'Auto')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $row.ColumnDefinitions.Add($cd) }
+        $n = New-IpText $g.Name 13.5 'SemiBold'; [void]$row.Children.Add($n)
+        $c2 = New-IpPanel; $c2.Margin = '8,0,8,0'; [Windows.Controls.Grid]::SetColumn($c2, 1)
+        $tb = New-Object Windows.Controls.TextBox; $tb.Text = $url; $tb.IsReadOnly = $true; $tb.FontFamily = 'Consolas'; $tb.FontSize = 12.5; $tb.BorderThickness = '0'; $tb.Background = [Windows.Media.Brushes]::Transparent; $tb.Padding = '0'
+        $tb.ToolTip = 'Označte a zkopírujte (Ctrl+C), vložte do adresního řádku prohlížeče.'
+        [void]$c2.Children.Add($tb); [void]$c2.Children.Add((New-IpText $how 12.5 'Normal' $script:Col.Muted -Wrap))
+        [void]$row.Children.Add($c2)
+        $ob = New-IpButton 'Otevřít' 'Btn' @($g.Exe, $url, $g.Name) '' '10,3'; $ob.VerticalAlignment = 'Top'; [Windows.Controls.Grid]::SetColumn($ob, 2)
+        $ob.IsEnabled = $CanOpen
+        $ob.ToolTip = if ($CanOpen) { "Otevře $($g.Name) na této stránce (pod vaším účtem)." } else { 'Jen pro vlastní účet – jinému uživateli prohlížeč pod jeho účtem otevřít nejde. Ať adresu vloží do svého prohlížeče sám.' }
+        $ob.Add_Click({ param($s, $e) Invoke-IpSafe {
+                $exe = Find-IpBrowserExe ([string]$s.Tag[0])
+                if (-not $exe) { Show-IpToast "$($s.Tag[2]) se nepodařilo najít – zkopírujte adresu a vložte ji do prohlížeče."; return }
+                Start-Process -FilePath $exe -ArgumentList ([string]$s.Tag[1]) } })
+        [void]$row.Children.Add($ob)
+        [void]$p.Children.Add((New-IpBorder -Child $row -BorderColor $script:Col.Line2 -Thickness '0,1,0,0'))
+    }
+    [void]$p.Children.Add((New-IpText 'Soubor CSV obsahuje hesla v čitelné podobě. Po importu na novém PC ho smažte z Plochy i ze zálohy (složka Plocha ve složce zálohy na NAS).' 12.5 'SemiBold' $script:Col.Err -Wrap -Margin '0,8,0,0'))
+    $bg = if ($Mode -eq 'export') { $script:Col.WarnSoft } else { $script:Col.Surface }
+    return (New-IpBorder -Child $p -Bg $bg -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Margin $Margin)
+}
+
 function Start-IpBkUsers {
     $B = $script:S.B
     if (@($script:S.Jobs | Where-Object Kind -eq 'bkusers').Count) { return }
@@ -1900,7 +1956,7 @@ function Add-IpBkBackupTab { param($d)
                 }
                 else {
                     $hasBrowser = $true
-                    $opts = @(, @('', 'Nezálohovat')) + @(, @('bookmarks', 'Jen záložky')) + @(, @('full', 'Celý profil – záložky, hesla, historie, rozšíření'))
+                    $opts = @(, @('', 'Nezálohovat')) + @(, @('bookmarks', 'Jen záložky')) + @(, @('full', 'Celý profil (hesla, historie…)'))
                     $cb = New-IpCombo -Options $opts -Selected $mode -Tag $it.Id -Enabled $canUse -Width 290 -OnChange { param($s, $e) Invoke-IpSafe {
                             $sel = $script:S.B.SelBy[$script:S.B.Sid]; $v = [string]$s.SelectedItem.Tag
                             if ($v) { $sel[[string]$s.Tag] = $v } else { [void]$sel.Remove([string]$s.Tag) }; Update-IpBackupWindow } }
@@ -1913,7 +1969,9 @@ function Add-IpBkBackupTab { param($d)
             if (-not $hasBrowser) { [void]$tbl.Children.Add((New-IpBorder -Child (New-IpText 'Prohlížeče: u uživatele nejsou data Chrome, Edge, Brave, Opera ani Firefox.' 13 'Normal' $script:Col.Muted -Wrap) -BorderColor $script:Col.Line2 -Thickness '0,1,0,0' -Padding '14,10')) }
             [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
             if ($hasBrowser) {
-                [void]$d.Children.Add((New-IpText 'Celý profil prohlížeče = záložky, uložená hesla, historie, rozšíření a nastavení (bez mezipaměti). Hesla Chrome / Edge / Brave / Opera jsou šifrovaná klíčem účtu Windows – zálohují se s nimi i klíče (DPAPI) a na novém PC je přečte STEJNÝ doménový účet. Pro jiný nebo místní účet přeneste hesla synchronizací prohlížeče (přihlášení do Google / Microsoft účtu) nebo exportem do CSV. Firefox přenese hesla vždy. Přihlášení na webech (cookies) se většinou nepřenese – bude potřeba se přihlásit znovu.' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '4,8,0,0'))
+                [void]$d.Children.Add((New-IpText 'Celý profil prohlížeče = záložky, uložená hesla, historie, rozšíření a nastavení (bez mezipaměti). Přihlášení na webech (cookies) se většinou nepřenese – bude potřeba se přihlásit znovu.' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '4,8,0,0'))
+                $bids = @($entry.Items | Where-Object Group -eq 'browser' | ForEach-Object Id)
+                [void]$d.Children.Add((New-IpPwGuide -Ids $bids -Mode 'export' -CanOpen ([bool]$u.Self) -Margin '0,10,0,0'))
             }
         }
     }
@@ -2041,6 +2099,8 @@ function Add-IpBkRestoreTab { param($d)
         [void]$tbl.Children.Add((New-IpBorder -Child $g -BorderColor $script:Col.Line2 -Thickness '0,1,0,0'))
     }
     [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
+    $bids = @($bk.Items | Where-Object { [string]$_.Group -eq 'browser' } | ForEach-Object { [string]$_.Id })
+    if ($bids.Count) { [void]$d.Children.Add((New-IpPwGuide -Ids $bids -Mode 'import' -CanOpen ([bool]($tu -and $tu.Self)) -Margin '0,12,0,0')) }
 }
 
 function Update-IpBkFooter {
@@ -2134,6 +2194,18 @@ function Start-IpBackupRun {
     $target = ([string]$B.Target).Trim().TrimEnd('\')
     if (-not $target) { Show-IpToast 'Vyberte, kam zálohu uložit.'; return }
     $browsers = @($pick | Where-Object Group -eq 'browser')
+    # Upozornění na export hesel (jednou za relaci pro uživatele). Jistě přenese hesla jen export do CSV;
+    # Firefox s celým profilem je přenese sám, proto se na něj neptá.
+    $pwRisk = @($browsers | Where-Object { $_.Kind -ne 'firefox' -or $sel[$_.Id] -eq 'bookmarks' })
+    if ($pwRisk.Count -and -not $B.PwAck.ContainsKey($u.Sid)) {
+        $names = ($pwRisk | ForEach-Object Name) -join ', '
+        $a = Show-IpBkConfirm -Title 'Jsou hesla prohlížečů exportovaná?' -Icon 'warn' -Lines @(
+            "Hesla z $names záloha profilu přenese jen do stejného doménového účtu a ani tam to není zaručené (novější verze prohlížečů vážou šifrování i na počítač). U volby Jen záložky se hesla nezálohují vůbec.",
+            'Jistá cesta: hesla exportovat do souboru CSV na Plochu uživatele – záloha ho vezme s sebou a na novém PC se naimportují. Postup pro každý prohlížeč je v části 2 (Hesla prohlížečů – export do CSV).',
+            'Soubor CSV obsahuje hesla v čitelné podobě – po importu na novém PC ho smažte.') -Buttons @(, @('go', 'Hesla jsou exportovaná / nejsou potřeba – zálohovat', 'Primary'))
+        if (-not $a) { return }
+        $B.PwAck[$u.Sid] = $true
+    }
     $running = @(if ($browsers.Count) { Get-IpRunningBrowsers -Sid $u.Sid -Ids @($browsers | ForEach-Object Id) })
     $close = @()
     if ($running.Count) {
@@ -2393,7 +2465,8 @@ function Update-IpManual {
                 'Struktura: <cíl>\<POČÍTAČ>_<login>_<rrrrMMdd-HHmm>\ s podsložkami Plocha, Dokumenty, Stazene, Obrazky, Prohlizece\<prohlížeč>, DPAPI. backup.json popisuje, co je v záloze a s jakým výsledkem, _robocopy.log je podrobný log kopírování.',
                 'Složky se hledají podle registru uživatele (User Shell Folders), takže najde i plochu / dokumenty přesměrované do OneDrive nebo jinam. Složka přesměrovaná na server se nezálohuje (data už jsou tam). Soubory jen v cloudu (OneDrive) se nestahují.',
                 'Prohlížeče Chrome, Edge, Brave, Opera, Firefox: Jen záložky, nebo Celý profil (záložky, hesla, historie, rozšíření, nastavení – bez mezipaměti). Spuštěný prohlížeč okno nabídne zavřít, jinak by otevřené soubory nešly zkopírovat.',
-                'Hesla Chrome / Edge / Brave / Opera šifruje Windows (DPAPI) klíčem účtu. S celým profilem se proto zálohují i klíče DPAPI (AppData\Roaming\Microsoft\Protect). Na novém PC je přečte jen STEJNÝ doménový účet. Pro jiný nebo místní účet: synchronizace prohlížeče (Google / Microsoft účet) nebo export hesel do CSV. Firefox nese hesla v profilu – přenesou se vždy. Přihlášení na webech (cookies) se většinou nepřenese.',
+                'Hesla Chrome / Edge / Brave / Opera šifruje Windows (DPAPI) klíčem účtu. S celým profilem se proto zálohují i klíče DPAPI (AppData\Roaming\Microsoft\Protect). Na novém PC je přečte jen STEJNÝ doménový účet a ani to není zaručené (novější verze prohlížečů vážou šifrování i na počítač). Proto okno před zálohou upozorní na export hesel do CSV na Plochu (návod a tlačítko Otevřít pro každý prohlížeč v části 2) a karta Obnovit ukáže postup importu. CSV je čitelné – po importu smazat. Firefox nese hesla v profilu – přenesou se vždy. Přihlášení na webech (cookies) se většinou nepřenese.',
+                'Firefox: po obnově se upraví profiles.ini / installs.ini – obnovený profil se nastaví jako výchozí a přiřadí instalaci Firefoxu na tomto PC (jinak by Firefox nainstalovaný v jiné složce založil nový prázdný profil).',
                 'Kopíruje robocopy (/E /XJ /COPY:DAT /MT:8, jako správce /B – čte i profily ostatních bez změny oprávnění). Na původním PC se nic nemění. Po dokončení se oprávnění složky zálohy omezí na SYSTEM, správce, toho, kdo zálohoval, a vlastníka dat (záloha obsahuje hesla).',
                 'Karta Obnovit ze zálohy: vyberte zálohu, uživatele na tomto PC (musí se tu aspoň jednou přihlásit) a co obnovit. Novější soubory se nepřepisují (/XO). Celý profil prohlížeče: stávající se přejmenuje na *.pred-obnovou-<datum>, nic se nemaže. Jen záložky: nahradí se jen soubor Bookmarks / places.sqlite (původní se odloží). Klíče DPAPI se jen doplní, stávající se nikdy nepřepíší.',
                 'Bez práv správce jde zálohovat a obnovit jen vlastní profil (pod vlastním účtem, se svými právy na NAS).')),
@@ -2411,7 +2484,8 @@ function Update-IpManual {
                 'Instalace bez UAC nefunguje (úloha neodpovídá) → restart PC, pak tools\Test-Broker.ps1; když chybí úloha, nasaďte GPO nebo spusťte tools\Install-Broker.ps1 jako správce.',
                 'Záloha: položka s upozorněním = některé soubory byly otevřené nebo bez oprávnění (seznam v _robocopy.log v záloze). Zavřete programy uživatele (Outlook, prohlížeč) a zálohujte znovu – nová záloha je vždy samostatná složka.',
                 'Záloha na NAS selže s přístupem odepřeným → účet, pod kterým okno běží (u UAC účet správce), nemá zápis do cílové složky. Zvolte jinou složku, nebo nastavte práva na NAS.',
-                'Po obnově Chrome / Edge nezná hesla → obnoveno do jiného účtu, nebo v záloze chybí DPAPI (záloha jen záložek). Hesla přeneste synchronizací nebo exportem CSV ze starého PC.',
+                'Po obnově Chrome / Edge / Brave / Opera nezná hesla → jiný účet, novější prohlížeč, nebo záloha jen záložek. Naimportujte CSV exportované před zálohou (karta Obnovit, Hesla prohlížečů – import), případně synchronizace prohlížeče.',
+                'Firefox po obnově ukazuje prázdný profil → about:profiles, u obnoveného profilu Nastavit jako výchozí a restart Firefoxu (původní profil je odložený jako *.pred-obnovou-…).',
                 'Kolegovi nebo do tiketu pošlete: tlačítko Zkopírovat technické údaje (nahoře) + log (tlačítko Otevřít log).')),
         @('Kde jsou logy', @(
                 "Log: $($st.LogDirectory) (jeden soubor na den, PC_rrrrMMdd.log). Podrobné logy MSI jsou ve stejné složce. Index NAS: $($st.IndexPath). Bez práv správce jsou logy v %LOCALAPPDATA%\InstalaceProgramu\Logs, systémová úloha píše do C:\ProgramData\InstalaceProgramu\Logs.",
@@ -2445,7 +2519,8 @@ function Set-IpOffscreen { param($Window)
     $Window.WindowState = 'Normal'; $Window.WindowStartupLocation = 'Manual'; $Window.Left = -32000; $Window.Top = -32000
     # IP_SNAP_W = šířka hlavního okna pro test (např. 1366 – běžný notebook)
     $mw = if ($env:IP_SNAP_W) { [int]$env:IP_SNAP_W } else { 1680 }
-    if ($Window -eq $script:S.Win) { $Window.Width = $mw; $Window.Height = 960 } else { $Window.Width = 1240; $Window.Height = 900 }
+    $dh = if ($env:IP_SNAP_H) { [int]$env:IP_SNAP_H } else { 900 }
+    if ($Window -eq $script:S.Win) { $Window.Width = $mw; $Window.Height = 960 } else { $Window.Width = 1240; $Window.Height = $dh }
     $Window.ShowInTaskbar = $false
 }
 
@@ -2453,7 +2528,7 @@ function Invoke-IpDebugView {
     # Jen pro vývoj: IP_DEBUG=start|main|status|nas|manual otevře po první kontrole danou obrazovku;
     # s IP_SNAP_DIR uloží obsah oken do PNG a aplikaci zavře.
     if ($env:IP_SNAP_DIR) {
-        $t = New-Object Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds($(if ($env:IP_DEBUG -in @('backup', 'restore')) { 14 } else { 3 }))
+        $t = New-Object Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds($(if ($env:IP_SNAP_WAIT) { [int]$env:IP_SNAP_WAIT } elseif ($env:IP_DEBUG -in @('backup', 'restore')) { 14 } else { 3 }))
         $t.Add_Tick({ param($s, $e) $s.Stop(); Invoke-IpSafe {
                     Save-IpSnapshot $script:S.Win "$($env:IP_DEBUG)-main"
                     foreach ($x in @($script:S.StatusWin, $script:S.NasWin, $script:S.ManualWin, $script:S.L.Win, $script:S.B.Win)) { if ($x) { Save-IpSnapshot $x "$($env:IP_DEBUG)-dialog"; $x.Close() } }
@@ -2506,7 +2581,7 @@ function Show-IpApp {
             Win = $null; Tab = 'backup'; Users = $null; UsersLoading = $false; Error = ''; Sid = ''; Items = @{}; Paths = @{}; SelBy = @{}
             ItemsLoading = (New-Object 'System.Collections.Generic.HashSet[string]'); Target = ''; Busy = $false; Op = ''; State = $null
             Log = New-Object System.Collections.ArrayList; LogOpen = $false; Prog = $null; ItemState = [ordered]@{}; Done = $null; DestPath = ''
-            RRoot = ''; Backups = $null; ListLoading = $false; ListError = ''; Pick = ''; RSid = ''; RSel = (New-Object 'System.Collections.Generic.HashSet[string]')
+            RRoot = ''; Backups = $null; ListLoading = $false; ListError = ''; Pick = ''; RSid = ''; RSel = (New-Object 'System.Collections.Generic.HashSet[string]'); PwAck = @{}
             Scroll = $null; ScrollTo = 0; SumText = $null; GoBtn = $null; StopBtn = $null; ProgBar = $null; ProgText = $null
         }
         Root = (Split-Path -Parent $SrcDir)

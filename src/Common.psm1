@@ -15,7 +15,7 @@ $script:UninstallKeys = @(
 $script:TrustedOwnerSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 $script:SecuredDirectories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 $script:LogFile = $null
-$script:IpVersion = '3.1 (2026-11-24)'
+$script:IpVersion = '3.2 (2026-11-24)'
 # Zdrojový kód a historie verzí (každá nová verze se nahrává i sem)
 $script:IpRepoUrl = 'https://github.com/lukasobrucnik/instalace-programu'
 # Kde je aplikace (backend) na NAS. Spouštěč na ploše (Instalace-programu.cmd) čte stejnou hodnotu z registru.

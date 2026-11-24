@@ -38,6 +38,7 @@
     DOMENA\login, SID nebo default (= noví uživatelé). Pro -SetLanguage.
 
 .NOTES
+    Verze 3.2 (2026-11-24) – záloha: export / import hesel prohlížečů (CSV), Firefox po obnově použije obnovený profil.
     Verze 3.1 (2026-11-24) – nové okno Záloha uživatele (záloha / obnova plochy, dokumentů, stažených
     souborů a profilů prohlížečů), technické údaje v okně O instalátoru, změna adresy backendu, odlehčení
     pro slabší PC (sdílené runspace, mezipaměť Appx, kontrola jen v popředí).

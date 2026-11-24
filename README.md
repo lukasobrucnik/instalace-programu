@@ -1,4 +1,4 @@
-﻿# Instalace programů v3.1
+﻿# Instalace programů v3.2
 
 Nástroj pro správce IT na přípravu a správu firemních počítačů s Windows 10 a 11. Je napsaný ve Windows
 PowerShellu 5.1 s okenním rozhraním (WPF), takže na PC není potřeba nic doinstalovávat.
@@ -56,8 +56,12 @@ Tlačítko **Záloha uživatele** v horní liště.
   Složka přesměrovaná na server se nezálohuje. Soubory jen v cloudu se nestahují.
 - **Hesla:** Chrome / Edge / Brave / Opera šifruje Windows (DPAPI) klíčem účtu. S celým profilem se
   zálohují i klíče (`AppData\Roaming\Microsoft\Protect`) a na novém PC je přečte jen **stejný doménový
-  účet**. Jiný účet: synchronizace prohlížeče nebo export CSV. Firefox přenese hesla vždy. Přihlášení na
-  webech (cookies) se většinou nepřenese.
+  účet** a ani to není zaručené (novější prohlížeče vážou šifrování i na počítač). Proto okno před zálohou
+  upozorní na **export hesel do CSV na Plochu** (adresa, postup a tlačítko Otevřít pro každý prohlížeč)
+  a karta Obnovit ukáže postup importu. CSV je čitelné – po importu smazat. Firefox přenese hesla vždy.
+  Přihlášení na webech (cookies) se většinou nepřenese.
+- **Firefox:** po obnově se upraví `profiles.ini` / `installs.ini` – obnovený profil je výchozí a přiřadí se
+  instalaci Firefoxu na novém PC (jinak by Firefox v jiné složce, např. 32/64bit, založil prázdný profil).
 - Kopíruje `robocopy /E /XJ /COPY:DAT /MT:8 /XA:O` (jako správce `/B`). Na zdrojovém PC se nic nemění.
   Po dokončení se práva složky zálohy omezí na SYSTEM, správce, toho, kdo zálohoval, a vlastníka dat.
 - Bez práv správce jen vlastní profil (pod vlastním účtem a jeho právy na NAS). Systémová úloha se pro
@@ -217,6 +221,9 @@ Soubory `.cmd` musí být **bez** BOM a s konci řádků CRLF (`Add-Bom.ps1` to 
 
 ## Historie
 
+- **3.2 (2026-11-24)** – záloha: upozornění a návod na export hesel do CSV (Chrome, Edge, Brave, Opera,
+  Firefox) před zálohou, návod na import po obnově; Firefox po obnově použije obnovený profil i na PC
+  s jinou cestou instalace.
 - **3.1 (2026-11-24)** – okno Záloha uživatele (záloha / obnova), technické údaje a řešení problémů
   v okně O instalátoru, změna adresy backendu (HKLM `NasPath`), spouštěč čte adresu z registru,
   odlehčení pro slabší PC. Opraveno: ikona `Instalace-programu.ico` byla poškozená (starý `Add-Bom.ps1`
