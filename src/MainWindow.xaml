@@ -120,13 +120,19 @@
         </StackPanel>
         <ToggleButton x:Name="TabStart" DockPanel.Dock="Left" Style="{StaticResource Tab}" Content="Úvodní kontrola" IsChecked="True"/>
         <ToggleButton x:Name="TabMain" DockPanel.Dock="Left" Style="{StaticResource Tab}" Content="Hlavní okno"/>
-        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-          <TextBlock Text="Stav · klikněte pro návod:" Foreground="{StaticResource HdMuted}" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,6,0"/>
-          <StackPanel x:Name="LedPanel" Orientation="Horizontal"/>
-          <Button x:Name="BtnLang" Style="{StaticResource HdBtn}" Content="Jazyk uživatelů" Margin="12,0,0,0" ToolTip="Jazyk, klávesnice a formáty pro jednotlivé uživatele tohoto počítače"/>
-          <Button x:Name="BtnNas" Style="{StaticResource HdBtn}" Content="Obsah NAS" Margin="6,0,0,0"/>
-          <Button x:Name="BtnManual" Style="{StaticResource HdBtn}" BorderThickness="0" Foreground="#93A9AF" Content="O instalátoru" Margin="4,0,0,0"/>
-        </StackPanel>
+        <!-- WrapPanel: na užší obrazovce (notebook 1366 px) se tlačítka zalomí na druhý řádek, nic se neusekne -->
+        <WrapPanel DockPanel.Dock="Right" VerticalAlignment="Center" HorizontalAlignment="Right">
+          <StackPanel Orientation="Horizontal" Margin="0,2,0,2" ToolTip="Stav – klikněte na kontrolku pro vysvětlení a návod">
+            <TextBlock Text="Stav:" Foreground="{StaticResource HdMuted}" FontSize="11.5" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <StackPanel x:Name="LedPanel" Orientation="Horizontal"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="7,2,0,2">
+            <Button x:Name="BtnBackup" Style="{StaticResource HdBtn}" Content="Záloha uživatele" ToolTip="Záloha a přenos dat uživatele: plocha, dokumenty, stažené soubory, profily prohlížečů (záložky, hesla)"/>
+            <Button x:Name="BtnLang" Style="{StaticResource HdBtn}" Content="Jazyk uživatelů" Margin="6,0,0,0" ToolTip="Jazyk, klávesnice a formáty pro jednotlivé uživatele tohoto počítače"/>
+            <Button x:Name="BtnNas" Style="{StaticResource HdBtn}" Content="Obsah NAS" Margin="6,0,0,0"/>
+            <Button x:Name="BtnManual" Style="{StaticResource HdBtn}" BorderThickness="0" Foreground="#93A9AF" Content="O instalátoru" Margin="4,0,0,0" ToolTip="Technické údaje (kde je aplikace na NAS, cíl záloh, logy), správa a řešení problémů"/>
+          </StackPanel>
+        </WrapPanel>
       </DockPanel>
     </Border>
 
@@ -183,11 +189,12 @@
         <Border Grid.Row="0" Background="White" BorderBrush="{StaticResource Line}" BorderThickness="0,0,0,1" Padding="20,12">
           <DockPanel>
             <Button x:Name="BtnClear" DockPanel.Dock="Right" Style="{StaticResource Btn}" Padding="10,4" Content="Zrušit vše" ToolTip="Odebere všechny programy kromě povinných" VerticalAlignment="Center"/>
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <!-- WrapPanel: na užší obrazovce se přepínač Instalovat pro zalomí pod nadpis (dřív zajel pod Zrušit vše) -->
+            <WrapPanel VerticalAlignment="Center">
               <Border Width="22" Height="22" CornerRadius="11" Background="{StaticResource Accent}"><TextBlock Text="2" Foreground="White" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border>
               <TextBlock x:Name="MidTitle" Text="Vybrané programy" FontWeight="Bold" FontSize="15" Margin="10,0,8,0" VerticalAlignment="Center"/>
               <TextBlock x:Name="MidCount" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,24,0"/>
-              <StackPanel x:Name="ModePanel" Orientation="Horizontal" VerticalAlignment="Center">
+              <StackPanel x:Name="ModePanel" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,2,10,2">
                 <TextBlock Text="Instalovat pro" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Margin="0,0,8,0"/>
                 <RadioButton x:Name="RbRec" Style="{StaticResource Seg}" GroupName="mode" Content="Podle doporučení" IsChecked="True"/>
                 <RadioButton x:Name="RbAll" Style="{StaticResource Seg}" GroupName="mode" Content="Všichni uživatelé"/>
@@ -196,7 +203,7 @@
                 <Ellipse Width="7" Height="7" Fill="#1B7443" Margin="10,0,4,0" VerticalAlignment="Center"/>
                 <TextBlock Text="doporučeno" Foreground="{StaticResource Muted}" FontSize="12" VerticalAlignment="Center"/>
               </StackPanel>
-            </StackPanel>
+            </WrapPanel>
           </DockPanel>
         </Border>
         <ScrollViewer x:Name="SelScroll" Grid.Row="1"><StackPanel x:Name="SelList" Margin="20,8,20,24"/></ScrollViewer>

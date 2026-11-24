@@ -15,8 +15,46 @@ $script:UninstallKeys = @(
 $script:TrustedOwnerSids = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
 $script:SecuredDirectories = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 $script:LogFile = $null
+$script:IpVersion = '3.1 (2026-11-24)'
+# Zdrojový kód a historie verzí (každá nová verze se nahrává i sem)
+$script:IpRepoUrl = 'https://github.com/lukasobrucnik/instalace-programu'
+# Kde je aplikace (backend) na NAS. Spouštěč na ploše (Instalace-programu.cmd) čte stejnou hodnotu z registru.
+# Zapisovat do HKLM smí jen správce – běžný uživatel adresu nepodvrhne (spouštěč pak běží s právy správce).
+$script:NasRegKey = 'HKLM:\SOFTWARE\InstalaceProgramu'
+$script:NasRegValue = 'NasPath'
 
 #region Nastavení
+
+function Get-IpVersion { return $script:IpVersion }
+function Get-IpRepoUrl { return $script:IpRepoUrl }
+
+function Get-IpNasOverride {
+    # Adresa backendu nastavená v okně O instalátoru (registr HKLM). '' = výchozí z settings.json / spouštěče.
+    try {
+        $k = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64').OpenSubKey('SOFTWARE\InstalaceProgramu')
+        if (-not $k) { return '' }
+        try { return ([string]$k.GetValue($script:NasRegValue, '')).Trim() } finally { $k.Dispose() }
+    } catch { return '' }
+}
+
+function Set-IpNasOverride {
+    # Uloží (nebo s prázdnou hodnotou smaže) adresu backendu na NAS. Jen správce.
+    param([AllowEmptyString()] [string] $Path)
+    if (-not (Test-IpAdmin)) { throw 'Adresu aplikace na NAS smí změnit jen správce.' }
+    $Path = ([string]$Path).Trim().TrimEnd('\')
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64')
+    try {
+        if (-not $Path) {
+            $k = $base.OpenSubKey('SOFTWARE\InstalaceProgramu', $true)
+            if ($k) { try { $k.DeleteValue($script:NasRegValue, $false) } finally { $k.Dispose() } }
+            return
+        }
+        if ($Path -notmatch '^(\\\\[^\\]+\\[^\\]+|[A-Za-z]:\\).*') { throw 'Zadejte síťovou cestu (\\server\sdílení\...) nebo cestu na disku (C:\...).' }
+        $k = $base.CreateSubKey('SOFTWARE\InstalaceProgramu')
+        try { $k.SetValue($script:NasRegValue, $Path, [Microsoft.Win32.RegistryValueKind]::String) } finally { $k.Dispose() }
+    }
+    finally { $base.Dispose() }
+}
 
 function Get-IpValue {
     # Bezpečně přečte volitelnou vlastnost objektu z JSON (chybějící = výchozí hodnota).
@@ -47,13 +85,20 @@ function Get-IpSettings {
     # Bez práv správce (okno v režimu systémové úlohy) do ProgramData zapisovat nejde –
     # log a mezipaměť indexu jsou pak v profilu uživatele.
     $data = if (Test-IpAdmin) { $system } else { Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'InstalaceProgramu' }
+    $deployDefault = & $exp (Get-IpValue $j 'deployPath' '')
+    $override = Get-IpNasOverride
     return [pscustomobject]@{
         SystemDataDirectory       = $system
         AppDirectory              = & $exp (Get-IpValue $j 'appDirectory' '%ProgramFiles%\InstalaceProgramu')
         BrokerTaskName            = [string](Get-IpValue $j 'brokerTaskName' 'InstalaceProgramu-Broker')
         NoInteractive             = $false
         SourceRoots               = @(Get-IpValue $j 'sourceRoots' @() | ForEach-Object { (& $exp $_).TrimEnd('\') } | Where-Object { $_ })
-        DeployPath                = & $exp (Get-IpValue $j 'deployPath' '')
+        # adresa aplikace na NAS: změněná v okně O instalátoru (registr), jinak settings.json
+        DeployPath                = $(if ($override) { $override } else { $deployDefault })
+        DeployPathDefault         = $deployDefault
+        DeployPathOverridden      = [bool]$override
+        # kam se ukládají zálohy uživatelů (okno Záloha uživatele); jde změnit i v okně
+        BackupRoot                = (& $exp (Get-IpValue $j 'backupRoot' '')).TrimEnd('\')
         DataDirectory             = $data
         LogDirectory              = Join-Path $data 'Logs'
         TempDirectory             = Join-Path $data 'Temp'
@@ -122,7 +167,8 @@ function Set-IpProtectedAcl {
 
 function Initialize-IpSecureDirectory {
     param([Parameter(Mandatory)] [string] $Path)
-    if ($script:SecuredDirectories.Contains($Path)) { return $Path }
+    # mezipaměť ověřených složek (úlohy sdílí runspace); smazanou složku ověřit a založit znovu
+    if ($script:SecuredDirectories.Contains($Path)) { if (Test-Path -LiteralPath $Path) { return $Path }; [void]$script:SecuredDirectories.Remove($Path) }
     $parent = Split-Path -Parent $Path
     if ($parent -and -not (Test-Path -LiteralPath $parent)) { [void](Initialize-IpSecureDirectory -Path $parent) }
     elseif ($parent) {
@@ -265,8 +311,8 @@ function Get-IpLoggedOnUser {
         if (-not $o.User) { return $null }
         $name = if ($o.Domain) { "$($o.Domain)\$($o.User)" } else { $o.User }
         $sid = (New-Object Security.Principal.NTAccount($name)).Translate([Security.Principal.SecurityIdentifier]).Value
-        $profile = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -ErrorAction SilentlyContinue).ProfileImagePath
-        return [pscustomobject]@{ Name = $name; Short = $o.User; Sid = $sid; ProfilePath = $profile }
+        $profPath = (Get-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$sid" -ErrorAction SilentlyContinue).ProfileImagePath
+        return [pscustomobject]@{ Name = $name; Short = $o.User; Sid = $sid; ProfilePath = $profPath }
     }
     catch { return $null }
 }
@@ -331,6 +377,7 @@ function Get-IpUninstallEntries {
 #endregion
 
 Export-ModuleMember -Function @(
+    'Get-IpVersion', 'Get-IpRepoUrl', 'Get-IpNasOverride', 'Set-IpNasOverride',
     'Get-IpValue', 'Read-IpJson', 'Get-IpSettings', 'Test-IpAdmin', 'Assert-IpTrustedDirectory', 'Initialize-IpSecureDirectory', 'New-IpWorkFolder',
     'Send-IpEvent', 'Write-IpLog', 'Get-IpLogFile', 'Write-IpAudit', 'ConvertTo-IpVersion', 'Compare-IpVersion',
     'ConvertTo-IpUncPath', 'Get-IpLoggedOnUser', 'Invoke-IpAsUser', 'Get-IpUninstallEntries'

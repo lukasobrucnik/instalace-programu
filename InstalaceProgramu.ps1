@@ -38,8 +38,21 @@
     DOMENA\login, SID nebo default (= noví uživatelé). Pro -SetLanguage.
 
 .NOTES
+    Verze 3.1 (2026-11-24) – nové okno Záloha uživatele (záloha / obnova plochy, dokumentů, stažených
+    souborů a profilů prohlížečů), technické údaje v okně O instalátoru, změna adresy backendu, odlehčení
+    pro slabší PC (sdílené runspace, mezipaměť Appx, kontrola jen v popředí).
+
+    Kde aplikace je (backend):  \\FS01\backup\IT\Programy\_IT\ProgramInstalace\v3
+      - na plochu PC stačí jen spouštěč Instalace-programu.cmd, vše ostatní běží z NAS
+      - adresa: registr HKLM\SOFTWARE\InstalaceProgramu, hodnota NasPath (okno O instalátoru ->
+        Změnit adresu na NAS, nebo GPO), jinak config\settings.json deployPath a řádek set "NAS=..." ve spouštěči
+    Zálohy uživatelů (výchozí):   \\FS01\backup\IT\Backup\Uzivatele-profily   (settings.json backupRoot)
+    Logy:                         C:\ProgramData\InstalaceProgramu\Logs  (bez práv správce %LOCALAPPDATA%\InstalaceProgramu\Logs)
+
     Návratové kódy: 0 = OK, 1 = něco selhalo, 2 = chybné parametry / spuštění, 3010 = OK, nutný restart.
-    Skript na NAS nic nemaže ani nemění; zapisuje jen do %ProgramData%\InstalaceProgramu.
+    Skript na NAS nic nemaže ani nemění; zapisuje jen do %ProgramData%\InstalaceProgramu
+    (a při záloze uživatele do zvolené cílové složky).
+    Funguje na Windows 10 i 11 (Windows PowerShell 5.1).
 #>
 [CmdletBinding()]
 param(
@@ -110,14 +123,22 @@ function Write-Diagnostics {
     $line = { param($l, $v, $ok) Write-Host ('  {0,-24} {1}' -f $l, $v) -ForegroundColor $(if ($ok) { 'Gray' } else { 'Yellow' }) }
     Write-Host ''
     Write-Host '=== Instalace programů v3 – diagnostika spuštění ===' -ForegroundColor Cyan
+    & $line 'Windows' "$([Environment]::OSVersion.Version)" $true
     & $line 'PowerShell' "$($PSVersionTable.PSVersion)" ($PSVersionTable.PSVersion.Major -ge 5)
+    try {
+        Import-Module (Join-Path $src 'Common.psm1')
+        $st = Get-IpSettings -Path (Join-Path $root 'config\settings.json')
+        & $line 'Verze aplikace' (Get-IpVersion) $true
+        & $line 'Backend na NAS' "$($st.DeployPath)$(if ($st.DeployPathOverridden) { '  (registr HKLM NasPath)' } else { '  (výchozí)' })" (Test-Path -LiteralPath (Join-Path $st.DeployPath 'InstalaceProgramu.ps1'))
+        & $line 'Cíl záloh uživatelů' $st.BackupRoot $true
+    } catch { & $line 'Nastavení' "nejde načíst: $($_.Exception.Message)" $false }
     & $line 'Účet' "$([Environment]::UserDomainName)\$([Environment]::UserName)" $true
     & $line 'Práva správce' (Test-Admin) $true
     $brk = try { Import-Module (Join-Path $src 'Common.psm1'); Import-Module (Join-Path $src 'Broker.psm1'); Test-IpBroker -Settings (Get-IpSettings -Path (Join-Path $root 'config\settings.json')) } catch { $false }
     & $line 'Systémová úloha' $(if ($brk) { 'nainstalovaná – instalace bez UAC' } else { 'chybí – bude potřeba UAC (účet správce)' }) ($brk -or (Test-Admin))
     & $line 'Režim vlákna' ([Threading.Thread]::CurrentThread.GetApartmentState()) $true
     & $line 'Skript' $scriptPath $true
-    foreach ($f in 'config\settings.json', 'config\catalog.json', 'src\Gui.psm1', 'src\MainWindow.xaml') { $ok = Test-Path -LiteralPath (Join-Path $root $f); & $line $f $(if ($ok) { 'nalezen' } else { 'CHYBÍ – nakopírujte celou složku' }) $ok }
+    foreach ($f in 'config\settings.json', 'config\catalog.json', 'src\Gui.psm1', 'src\Backup.psm1', 'src\MainWindow.xaml') { $ok = Test-Path -LiteralPath (Join-Path $root $f); & $line $f $(if ($ok) { 'nalezen' } else { 'CHYBÍ – nakopírujte celou složku' }) $ok }
     foreach ($p in Get-ExecutionPolicy -List) { $forced = $p.Scope -in @('MachinePolicy', 'UserPolicy') -and $p.ExecutionPolicy -notin @('Undefined', 'Bypass', 'Unrestricted'); & $line "Policy $($p.Scope)" $p.ExecutionPolicy (-not $forced) }
     Write-Host ''
 }
@@ -155,7 +176,7 @@ try {
     }
     if ($mode -ne 'gui') { try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { } }
 
-    foreach ($m in 'Common', 'NasIndex', 'Health', 'Install', 'Language', 'Broker') { Import-Module (Join-Path $src "$m.psm1") -Force }
+    foreach ($m in 'Common', 'NasIndex', 'Health', 'Install', 'Language', 'Broker', 'Backup') { Import-Module (Join-Path $src "$m.psm1") -Force }
     $settings = Get-IpSettings -Path (Join-Path $root 'config\settings.json')
     $catalog = Read-IpCatalog -Path (Join-Path $root 'config\catalog.json')
 

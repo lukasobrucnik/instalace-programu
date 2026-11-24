@@ -1,6 +1,7 @@
 ﻿{
   "sourceRoots": ["\\\\FS01\\backup\\IT\\Programy\\_SW"],
   "deployPath": "\\\\FS01\\backup\\IT\\Programy\\_IT\\ProgramInstalace\\v3",
+  "backupRoot": "\\\\FS01\\backup\\IT\\Backup\\Uzivatele-profily",
   "dataDirectory": "%ProgramData%\\InstalaceProgramu",
   "appDirectory": "%ProgramFiles%\\InstalaceProgramu",
   "brokerTaskName": "InstalaceProgramu-Broker",

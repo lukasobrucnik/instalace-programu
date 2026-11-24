@@ -1,7 +1,74 @@
-﻿# Instalace programů v3
+﻿# Instalace programů v3.1
 
-Instaluje firemní programy z NAS (`\\FS01\backup\IT\Programy\_SW`) – offline, tiše na pozadí.
-Když program na NAS chybí nebo se z něj nenainstaluje, použije internet (winget).
+Nástroj pro správce IT na přípravu a správu firemních počítačů s Windows 10 a 11. Je napsaný ve Windows
+PowerShellu 5.1 s okenním rozhraním (WPF), takže na PC není potřeba nic doinstalovávat.
+
+**Co umí**
+
+- **Instalace programů z NAS** (`\\FS01\backup\IT\Programy\_SW`) – offline a tiše na pozadí, podle balíčků
+  (Nový počítač, Kancelář, Spedice, Technik, Vzdálená podpora) nebo jednotlivě. Když instalátor na NAS
+  chybí nebo selže, použije internet (winget).
+- **Rozpozná obsah NAS sám** – verze a nové soubory pozná podle pravidel v `config/catalog.json`, bez úprav skriptu.
+- **Úvodní kontrola** – NAS, internet, oprávnění, Sophos, písmo, místo na disku; u každého problému postup řešení.
+- **Instalace bez UAC** pro běžné uživatele přes systémovou úlohu (nasazení GPO).
+- **Jazyk uživatelů** – klávesnice, jazyk Windows a formáty pro jednotlivé uživatele, návrh podle AD; mazání profilů.
+- **Záloha a přenos dat uživatele** – plocha, dokumenty, stažené soubory, obrázky a profily prohlížečů
+  (záložky, nebo celý profil i s hesly) na NAS / disk a obnova na jiném PC.
+- **O instalátoru** – technické údaje (kde je aplikace na NAS, cíl záloh, logy), správa a řešení problémů.
+
+**Rychlý start**
+
+1. Celou složku nakopírujte na NAS (`\\FS01\backup\IT\Programy\_IT\ProgramInstalace\v3`).
+2. Na plochu PC dejte jen `Instalace-programu.cmd` – zbytek aplikace se spouští z NAS.
+3. Dvojklik → aplikace si řekne o práva správce (nebo instaluje přes systémovou úlohu bez UAC).
+
+Cesty k serverům jsou firemní; jiné prostředí upraví `config/settings.json` (cesty, limity),
+`config/catalog.json` (programy) a `config/languages.json` (jazyky poboček).
+
+**Verze a historie:** každá verze je v tomto repozitáři jako tag (`v3.0`, `v3.1`, …) – viz
+[Releases / Tags](https://github.com/lukasobrucnik/instalace-programu/tags) a sekce Historie níže.
+
+## Kde co je (technické údaje – vidíte je i v okně O instalátoru)
+
+| Co | Kde | Kde se mění |
+|---|---|---|
+| Aplikace (backend) | `\\FS01\backup\IT\Programy\_IT\ProgramInstalace\v3` | registr `HKLM\SOFTWARE\InstalaceProgramu` `NasPath` (O instalátoru → Změnit adresu na NAS, nebo GPO), jinak `settings.json` `deployPath` + řádek `set "NAS=..."` ve spouštěči |
+| Spouštěč na plochu | `Instalace-programu.cmd` – na plochu stačí jen on | – |
+| Instalátory | `\\FS01\backup\IT\Programy\_SW` | `settings.json` `sourceRoots` |
+| Zálohy uživatelů | `\\FS01\backup\IT\Backup\Uzivatele-profily` (vznikne při první záloze) | `settings.json` `backupRoot`, v okně jde zvolit jiný cíl |
+| Logy | `C:\ProgramData\InstalaceProgramu\Logs` (bez práv správce `%LOCALAPPDATA%\InstalaceProgramu\Logs`) | `settings.json` `dataDirectory` |
+| Místní kopie pro systémovou úlohu | `C:\Program Files\InstalaceProgramu` | `settings.json` `appDirectory` |
+
+Adresa v HKLM: zapisovat smí jen správce. Kdyby ji mohl změnit běžný uživatel, podstrčil by skript,
+který se pak spustí s právy správce. Proto ne soubor vedle spouštěče ani `%LOCALAPPDATA%`.
+
+## Záloha a přenos dat uživatele
+
+Tlačítko **Záloha uživatele** v horní liště.
+
+- **Zálohovat:** uživatel → co (plocha, dokumenty, stažené soubory, obrázky; prohlížeče Chrome, Edge,
+  Brave, Opera, Firefox: *jen záložky* nebo *celý profil* = záložky, hesla, historie, rozšíření,
+  nastavení, bez mezipaměti) → kam. Výsledek: `<cíl>\<POČÍTAČ>_<login>_<rrrrMMdd-HHmm>\` s `backup.json`
+  (obsah a výsledek) a `_robocopy.log`.
+- **Obnovit ze zálohy:** záloha → uživatel na tomto PC (musí tu mít profil) → co. Novější soubory se
+  nepřepisují (`/XO`). Celý profil prohlížeče: stávající se odloží jako `*.pred-obnovou-<datum>`.
+- Složky se hledají podle registru uživatele (User Shell Folders) – i přesměrované do OneDrive.
+  Složka přesměrovaná na server se nezálohuje. Soubory jen v cloudu se nestahují.
+- **Hesla:** Chrome / Edge / Brave / Opera šifruje Windows (DPAPI) klíčem účtu. S celým profilem se
+  zálohují i klíče (`AppData\Roaming\Microsoft\Protect`) a na novém PC je přečte jen **stejný doménový
+  účet**. Jiný účet: synchronizace prohlížeče nebo export CSV. Firefox přenese hesla vždy. Přihlášení na
+  webech (cookies) se většinou nepřenese.
+- Kopíruje `robocopy /E /XJ /COPY:DAT /MT:8 /XA:O` (jako správce `/B`). Na zdrojovém PC se nic nemění.
+  Po dokončení se práva složky zálohy omezí na SYSTEM, správce, toho, kdo zálohoval, a vlastníka dat.
+- Bez práv správce jen vlastní profil (pod vlastním účtem a jeho právy na NAS). Systémová úloha se pro
+  zálohy nepoužívá (SYSTEM nemá zápis na NAS).
+- Spuštěný prohlížeč okno nabídne zavřít (otevřené soubory by nešly zkopírovat).
+
+## Výkon (slabší PC)
+
+Úlohy na pozadí sdílí jeden fond runspace (moduly se načtou jednou). Seznam balíčků Appx se drží
+10 minut a po instalaci se obnoví. Průběžná kontrola stavu (každou minutu) běží jen když je aplikace
+v popředí; po návratu do okna se hned doběhne.
 
 ## Nasazení na NAS
 
@@ -45,7 +112,7 @@ takto nainstalovat nejde. Úloha běží v neviditelné relaci a okno by nikdo n
 ## Spuštění
 
 - Dvojklik na `Instalace programů.lnk` nebo `Instalace-programu.cmd` (z NAS i jako kopie na ploše –
-  spouštěč si skript najde na NAS sám). Na dotaz Windows klikněte Ano.
+  spouštěč si skript najde na NAS sám; na plochu stačí jen tento jeden soubor). Na dotaz Windows klikněte Ano.
 - Při prvním spuštění se na veřejnou plochu vytvoří zástupce s ikonou.
 - Když se nic neotevře: `Diagnostika.cmd` (viditelná konzole, vypíše co chybí).
 
@@ -137,6 +204,7 @@ src/NasIndex.psm1         prohledání NAS, metadata a verze, mezipaměť
 src/Health.psm1           kontrolky a návody krok za krokem
 src/Install.psm1          tichá instalace, záloha přes winget, chyby, hlídání oken
 src/Broker.psm1           instalace bez práv správce: požadavky okno -> systémová úloha
+src/Backup.psm1           záloha a obnova dat uživatele (složky, prohlížeče, DPAPI), robocopy
 tools/Install-Broker.ps1  nasazení systémové úlohy (GPO, jako SYSTEM)
 tools/Start-Broker.ps1    spouští systémová úloha (obnoví kopii z NAS, zpracuje požadavky)
 tools/Test-Broker.ps1     ověření na PC (spouštět jako běžný uživatel)
@@ -145,3 +213,12 @@ tools/                    pomůcky pro správce a vývoj (BOM, zástupce, testy)
 ```
 Logy: `C:\ProgramData\InstalaceProgramu\Logs`. Soubory `.ps1/.psm1` musí být v UTF-8 s BOM
 (`tools\Add-Bom.ps1`) a v řetězcích v uvozovkách "" se nesmí používat české „“ – PowerShell je bere jako konec řetězce.
+Soubory `.cmd` musí být **bez** BOM a s konci řádků CRLF (`Add-Bom.ps1` to od v3.1 hlídá sám).
+
+## Historie
+
+- **3.1 (2026-11-24)** – okno Záloha uživatele (záloha / obnova), technické údaje a řešení problémů
+  v okně O instalátoru, změna adresy backendu (HKLM `NasPath`), spouštěč čte adresu z registru,
+  odlehčení pro slabší PC. Opraveno: ikona `Instalace-programu.ico` byla poškozená (starý `Add-Bom.ps1`
+  ji přepsal jako text) a spouštěče `.cmd` měly BOM.
+- 3.0 (2026-11-10) – instalace bez UAC (systémová úloha), jazyk uživatelů, mazání profilů.

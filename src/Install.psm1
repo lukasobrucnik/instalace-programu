@@ -22,7 +22,7 @@ function Get-IpInstalledState {
     .SYNOPSIS
         Pro každou položku katalogu zjistí, zda je nainstalovaná, jakou verzi a pro koho.
     #>
-    param([Parameter(Mandatory)] [object[]] $Items, [AllowNull()] $User)
+    param([Parameter(Mandatory)] [object[]] $Items, [AllowNull()] $User, [hashtable] $AppxCache)
     $entries = Get-IpUninstallEntries -UserSid $(if ($User) { $User.Sid } else { '' })
     $state = @{}
     $appxNames = $null
@@ -33,11 +33,14 @@ function Get-IpInstalledState {
             elseif ($User -and $User.ProfilePath -and (Test-Path -LiteralPath (Join-Path $User.ProfilePath 'AppData\Local\Microsoft\Windows\Fonts\code128.ttf'))) { $r.Installed = $true; $r.Scope = 'user' }
         }
         elseif ($it.DetectAppx) {
+            if ($null -eq $appxNames -and $AppxCache -and $AppxCache['Names'] -and $AppxCache['At'] -and ((Get-Date) - $AppxCache['At']).TotalMinutes -lt 10) { $appxNames = $AppxCache['Names'] }
             if ($null -eq $appxNames) {
+                # Výpis balíčků Appx je pomalý (sekundy, na slabších PC i desítky) – okno ho drží 10 min, po instalaci obnoví.
                 $appxNames = @{}
                 try { Get-AppxPackage -AllUsers -ErrorAction Stop | ForEach-Object { $appxNames[$_.Name] = [string]$_.Version } }
                 catch { try { Get-AppxPackage -ErrorAction Stop | ForEach-Object { $appxNames[$_.Name] = [string]$_.Version } } catch { } }   # bez práv správce aspoň balíčky přihlášeného
                 try { Get-AppxProvisionedPackage -Online -ErrorAction Stop | ForEach-Object { if (-not $appxNames.ContainsKey($_.DisplayName)) { $appxNames[$_.DisplayName] = [string]$_.Version } } } catch { }
+                if ($AppxCache) { $AppxCache['Names'] = $appxNames; $AppxCache['At'] = Get-Date }
             }
             $k = @($appxNames.Keys | Where-Object { $_ -like "*$($it.DetectAppx)*" }) | Select-Object -First 1
             if ($k) { $r.Installed = $true; $r.Version = $appxNames[$k]; $r.Scope = 'all' }

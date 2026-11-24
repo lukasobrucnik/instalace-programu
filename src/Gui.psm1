@@ -17,6 +17,7 @@ Import-Module (Join-Path $PSScriptRoot 'Health.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Install.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Language.psm1')
 Import-Module (Join-Path $PSScriptRoot 'Broker.psm1')
+Import-Module (Join-Path $PSScriptRoot 'Backup.psm1')
 
 $script:S = $null
 $script:C = @{}
@@ -152,18 +153,24 @@ function Get-IpSelected { return @(Get-IpAllItems | Where-Object { $script:S.Sel
 
 function Start-IpJob {
     param([Parameter(Mandatory)] [string] $Kind, [Parameter(Mandatory)] [scriptblock] $Script, [hashtable] $Params = @{})
-    $iss = [initialsessionstate]::CreateDefault()
-    try { $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass } catch { }
-    $iss.ImportPSModule(@('Common', 'NasIndex', 'Health', 'Install', 'Language', 'Broker' | ForEach-Object { Join-Path $script:S.SrcDir "$_.psm1" }))
-    $rs = [runspacefactory]::CreateRunspace($iss); $rs.ApartmentState = 'STA'; $rs.Open()
-    $ps = [powershell]::Create(); $ps.Runspace = $rs
+    # Fond runspace: moduly se načtou jednou a úlohy je sdílí (dřív nový runspace + import 7 modulů
+    # při každé úloze, tj. i při kontrole stavu každou minutu – na slabších PC znatelná zátěž).
+    if (-not $script:S.Pool) {
+        $iss = [initialsessionstate]::CreateDefault()
+        try { $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass } catch { }
+        $iss.ImportPSModule(@('Common', 'NasIndex', 'Health', 'Install', 'Language', 'Broker', 'Backup' | ForEach-Object { Join-Path $script:S.SrcDir "$_.psm1" }))
+        $pool = [runspacefactory]::CreateRunspacePool(1, 8, $iss, $Host)
+        $pool.ApartmentState = 'STA'; $pool.ThreadOptions = 'ReuseThread'; $pool.Open()
+        $script:S.Pool = $pool
+    }
+    $ps = [powershell]::Create(); $ps.RunspacePool = $script:S.Pool
     [void]$ps.AddScript($Script)
     foreach ($k in $Params.Keys) { [void]$ps.AddParameter($k, $Params[$k]) }
-    [void]$script:S.Jobs.Add([pscustomobject]@{ Kind = $Kind; PS = $ps; RS = $rs; Handle = $ps.BeginInvoke() })
+    [void]$script:S.Jobs.Add([pscustomobject]@{ Kind = $Kind; PS = $ps; RS = $null; Handle = $ps.BeginInvoke() })
 }
 
 $script:HealthJob = {
-    param($Settings, $Catalog, $Queue, [bool] $Rescan, $OldIndex, [bool] $Broker)
+    param($Settings, $Catalog, $Queue, [bool] $Rescan, $OldIndex, [bool] $Broker, [hashtable] $AppxCache)
     $user = Get-IpLoggedOnUser
     $winget = Find-IpWinget
     $nas = Test-IpNas -Settings $Settings
@@ -177,8 +184,8 @@ $script:HealthJob = {
         }
     }
     elseif ($index -and -not $nas.Ok) { $index.FromCache = $true }
-    $installed = Get-IpInstalledState -Items $Catalog.Items -User $user
-    $health = Get-IpHealth -Settings $Settings -Catalog $Catalog -Index $index -Nas $nas -Net $net -User $user -WingetPath $winget -Broker $Broker
+    $installed = Get-IpInstalledState -Items $Catalog.Items -User $user -AppxCache $AppxCache
+    $health =Get-IpHealth -Settings $Settings -Catalog $Catalog -Index $index -Nas $nas -Net $net -User $user -WingetPath $winget -Broker $Broker
     $Queue.Enqueue([pscustomobject]@{ Kind = 'health'; User = $user; Winget = $winget; Index = $index; Installed = $installed; Health = $health })
 }
 
@@ -187,7 +194,7 @@ function Start-IpHealthCheck { param([bool] $Rescan = $true)
     $script:S.Checking = $true
     if ($Rescan) { $script:S.ScanMsg = 'Ověřuji NAS, internet a obsah NAS…' }
     Update-IpAll
-    Start-IpJob -Kind 'health' -Script $script:HealthJob -Params @{ Settings = $script:S.Settings; Catalog = $script:S.Catalog; Queue = $script:S.Queue; Rescan = $Rescan; OldIndex = $(if ($Rescan) { $null } else { $script:S.Index }); Broker = [bool]$script:S.UseBroker }
+    Start-IpJob -Kind 'health' -Script $script:HealthJob -Params @{ Settings = $script:S.Settings; Catalog = $script:S.Catalog; Queue = $script:S.Queue; Rescan = $Rescan; OldIndex = $(if ($Rescan) { $null } else { $script:S.Index }); Broker = [bool]$script:S.UseBroker; AppxCache = $script:S.AppxCache }
 }
 
 $script:InstallJob = {
@@ -214,16 +221,26 @@ function Complete-IpJobs {
             if ($j.Kind -eq 'health') { $script:S.Checking = $false; Update-IpAll }
             if ($j.Kind -eq 'install' -and $script:S.Run) { $script:S.Run.Done = $true; Update-IpAll }
             if ($j.Kind -like 'lang*') { $script:S.L.Busy = $false; $script:S.L.Loading = $false; $script:S.L.Searching = $false; Update-IpLangWindow }
+            if ($j.Kind -like 'bk*') {
+                $B = $script:S.B; $B.UsersLoading = $false; $B.ListLoading = $false; $B.ItemsLoading.Clear()
+                if ($j.Kind -eq 'bkrun') { $B.Busy = $false; $B.State = $null }
+                Update-IpBackupWindow
+            }
         }
-        finally { $j.PS.Dispose(); $j.RS.Dispose(); $script:S.Jobs.Remove($j) }
+        finally { try { $j.PS.Dispose(); if ($j.RS) { $j.RS.Dispose() } } catch { }; $script:S.Jobs.Remove($j) }
     }
 }
 
 function Invoke-IpPump {
-    $m = $null; $n = 0; $dirty = $false; $runDirty = $false; $langDirty = $false; $whoDirty = $false
+    $m = $null; $n = 0; $dirty = $false; $runDirty = $false; $langDirty = $false; $whoDirty = $false; $bkDirty = ''
     while ($n -lt 300 -and $script:S.Queue.TryDequeue([ref]$m)) {
         $n++
         try {
+            if ([string]$m.Kind -like 'bk*') {
+                $r = Receive-IpBkEvent $m
+                if ($r -eq 'full') { $bkDirty = 'full' } elseif ($r -eq 'prog' -and -not $bkDirty) { $bkDirty = 'prog' }
+                continue
+            }
             switch ($m.Kind) {
                 'log' { Add-IpLogLine $m.Message }
                 'scan' { $script:S.ScanMsg = $m.Message; $script:C.StartSub.Text = $m.Message }
@@ -255,7 +272,7 @@ function Invoke-IpPump {
                     if ($m.On) { Show-IpToast 'Otevřelo se okno instalátoru – dokončete ho. Toto okno se zatím zmenšilo.'; $script:S.Win.WindowState = 'Minimized' }
                     else { $script:S.Win.WindowState = 'Maximized'; $script:S.Win.Activate() | Out-Null }
                 }
-                'done' { if ($script:S.Run) { $script:S.Run.Done = $true; $runDirty = $true; Start-IpHealthCheck -Rescan $false } }
+                'done' { if ($script:S.Run) { $script:S.Run.Done = $true; $runDirty = $true; $script:S.AppxCache.Clear(); Start-IpHealthCheck -Rescan $false } }
                 'langusers' {
                     $L = $script:S.L; $L.Loading = $false; $L.Error = [string]$m.Error
                     if ($m.Languages) { $L.Data = $m; $script:S.Langs = $m.Languages; $script:S.LangAssign = $m.Assign }
@@ -287,6 +304,7 @@ function Invoke-IpPump {
     elseif ($runDirty) { Update-IpMiddle; Update-IpLeftRightEnabled }
     elseif ($whoDirty) { Update-IpBundles }
     if ($langDirty) { Update-IpLangWindow }
+    if ($bkDirty -eq 'full') { Update-IpBackupWindow } elseif ($bkDirty -eq 'prog') { Update-IpBkProgress }
 }
 
 function Add-IpLogLine { param([string] $Line)
@@ -464,10 +482,17 @@ function Get-IpTags { param($Item, $Plan)
     return $sp
 }
 
+function Add-IpSelColumns { param($Grid)
+    # Sloupce prostřední tabulky. Poměrné s minimem: dřív pevných 716 px, takže na notebooku (1366 px)
+    # nezbylo místo na název programu. Na širší obrazovce vypadá stejně jako dřív.
+    foreach ($c in @(@('2*', 160), @('0.8*', 95), @('1.1*', 150), @('1.05*', 150), @('1*', 120), @('36', 36))) {
+        $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $c[0]; $cd.MinWidth = $c[1]; $Grid.ColumnDefinitions.Add($cd)
+    }
+}
 function New-IpSelRow { param($Item)
     $plan = Get-IpPlan $Item
     $g = New-Object Windows.Controls.Grid; $g.Margin = '14,8,8,8'
-    foreach ($w in @('2*', '140', '190', '180', '170', '36')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $w; $g.ColumnDefinitions.Add($cd) }
+    Add-IpSelColumns $g
     $nm = New-IpPanel; $nm.VerticalAlignment = 'Center'
     [void]$nm.Children.Add((Get-IpTags $Item $plan))
     if (-not $plan.Ok) { $sub = New-IpText "Nenainstaluje se: $($plan.Reason)" 12 'Normal' $script:Col.Err -Wrap }
@@ -591,7 +616,7 @@ function Update-IpMiddle {
         [void]$p.Children.Add((New-IpBorder -Child $ex -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '12,8' -Margin '0,8,0,4'))
     }
     $hdr = New-Object Windows.Controls.Grid; $hdr.Margin = '14,10,8,2'
-    $i = 0; foreach ($w in @('2*', '140', '190', '180', '170', '36')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $w; $hdr.ColumnDefinitions.Add($cd) }
+    $i = 0; Add-IpSelColumns $hdr
     foreach ($h in 'PROGRAM', 'ZDROJ', 'VERZE', 'PRO KOHO', 'NA TOMTO PC') { $t = New-IpText $h 11 'SemiBold' $script:Col.Muted; [Windows.Controls.Grid]::SetColumn($t, $i); $i++; [void]$hdr.Children.Add($t) }
     [void]$p.Children.Add($hdr)
 
@@ -1552,6 +1577,674 @@ function Start-IpLangFind {
 
 #endregion
 
+#region Záloha uživatele (doplňkové okno z horní lišty)
+
+$script:BkUsersJob = {
+    param($Queue)
+    try { $Queue.Enqueue([pscustomobject]@{ Kind = 'bkusers'; Users = @(Get-IpBackupUsers); Error = '' }) }
+    catch { $Queue.Enqueue([pscustomobject]@{ Kind = 'bkusers'; Users = @(); Error = $_.Exception.Message }) }
+}
+$script:BkItemsJob = {
+    param($Sid, $ProfilePath, [bool] $NoSize, $Queue)
+    try { $Queue.Enqueue([pscustomobject]@{ Kind = 'bkitems'; Sid = $Sid; NoSize = $NoSize; Items = @(Get-IpBackupItems -Sid $Sid -ProfilePath $ProfilePath -NoSize:$NoSize); Error = '' }) }
+    catch { $Queue.Enqueue([pscustomobject]@{ Kind = 'bkitems'; Sid = $Sid; NoSize = $NoSize; Items = @(); Error = $_.Exception.Message }) }
+}
+$script:BkListJob = {
+    param($Root, $Single, $Queue)
+    try {
+        $list = if ($Single) { @(Read-IpBackupManifest -Path $Single) } else { @(Get-IpBackups -Root $Root) }
+        $Queue.Enqueue([pscustomobject]@{ Kind = 'bklist'; Root = $Root; Single = $Single; Backups = $list; Error = '' })
+    }
+    catch { $Queue.Enqueue([pscustomobject]@{ Kind = 'bklist'; Root = $Root; Single = $Single; Backups = @(); Error = $_.Exception.Message }) }
+}
+$script:BkRunJob = {
+    param($Settings, $Sid, $Select, $Target, $Queue, $State, [string[]] $CloseIds)
+    if ($CloseIds.Count) {
+        try { $n = Stop-IpUserBrowsers -Sid $Sid -Ids $CloseIds; $Queue.Enqueue([pscustomobject]@{ Kind = 'bklog'; Level = 'Info'; Message = "Prohlížeče zavřeny ($n procesů)." }) }
+        catch { $Queue.Enqueue([pscustomobject]@{ Kind = 'bklog'; Level = 'Warning'; Message = "Prohlížeče nejde zavřít: $($_.Exception.Message)" }) }
+    }
+    Invoke-IpUserBackup -Settings $Settings -Sid $Sid -Select $Select -Target $Target -Queue $Queue -State $State
+}
+$script:BkRestoreJob = {
+    param($Settings, $Path, $Sid, $Ids, $Queue, $State, [string[]] $CloseIds)
+    if ($CloseIds.Count) {
+        try { $n = Stop-IpUserBrowsers -Sid $Sid -Ids $CloseIds; $Queue.Enqueue([pscustomobject]@{ Kind = 'bklog'; Level = 'Info'; Message = "Prohlížeče zavřeny ($n procesů)." }) }
+        catch { $Queue.Enqueue([pscustomobject]@{ Kind = 'bklog'; Level = 'Warning'; Message = "Prohlížeče nejde zavřít: $($_.Exception.Message)" }) }
+    }
+    Invoke-IpUserRestore -Settings $Settings -BackupPath $Path -Sid $Sid -Ids $Ids -Queue $Queue -State $State
+}
+
+function Get-IpBkPrefFile { return Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'InstalaceProgramu\zaloha-cil.txt' }
+function Get-IpBkRememberedTarget {
+    # Naposledy použitý cíl (jen pohodlí pro toho, kdo zálohuje), jinak backupRoot ze settings.json.
+    try { $f = Get-IpBkPrefFile; if (Test-Path -LiteralPath $f) { $t = ([IO.File]::ReadAllText($f)).Trim(); if ($t) { return $t } } } catch { }
+    return [string]$script:S.Settings.BackupRoot
+}
+function Save-IpBkRememberedTarget { param([string] $Path)
+    try { $f = Get-IpBkPrefFile; [void](New-Item -ItemType Directory -Path (Split-Path -Parent $f) -Force); [IO.File]::WriteAllText($f, $Path) } catch { }
+}
+
+function Get-IpBkUser { param([string] $Sid) return @($script:S.B.Users | Where-Object Sid -eq $Sid) | Select-Object -First 1 }
+function Test-IpBkAllowed { param($U) return [bool]($U -and ($script:S.IsAdmin -or $U.Self)) }
+function Get-IpBkItemSize { param($Item, [string] $Mode)
+    if ($Item.Group -eq 'browser' -and $Mode -eq 'bookmarks') { return [long]$Item.BookmarkSize }
+    return [long]$Item.Size
+}
+function Get-IpBkSizeText { param($Item, [string] $Mode, [bool] $Loading)
+    $s = Get-IpBkItemSize $Item $Mode
+    if ($s -lt 0) { if ($Loading) { return 'počítám…' } return '' }
+    return $(if ($Item.Partial) { 'víc než ' } else { '' }) + (Format-IpSize $s)
+}
+
+function Select-IpFolder { param([string] $Start, [string] $Text)
+    Add-Type -AssemblyName System.Windows.Forms
+    $d = New-Object Windows.Forms.FolderBrowserDialog
+    $d.Description = $Text; $d.ShowNewFolderButton = $true
+    try { if ($Start -and (Test-Path -LiteralPath $Start)) { $d.SelectedPath = $Start } } catch { }
+    try { if ($d.ShowDialog() -eq [Windows.Forms.DialogResult]::OK) { return $d.SelectedPath } } finally { $d.Dispose() }
+    return ''
+}
+
+function Show-IpBkConfirm {
+    # Buttons: @( @(hodnota, text, 'Primary'|'Btn'|'Danger'), ... ). Vrací hodnotu tlačítka, nebo $null (Zpět / Esc).
+    param([string] $Title, [string[]] $Lines, [object[]] $Buttons, [string] $Icon = 'warn')
+    $w = New-Object Windows.Window
+    $w.Title = 'Záloha uživatele'; $w.Owner = $script:S.B.Win; $w.WindowStartupLocation = 'CenterOwner'; $w.SizeToContent = 'Height'; $w.Width = 640; $w.ResizeMode = 'NoResize'
+    $w.FontFamily = 'Segoe UI'; $w.FontSize = 13.5; $w.Background = Get-IpBrush $script:Col.Surface
+    $p = New-IpPanel -Margin '22,20,22,20'
+    $h = New-IpPanel 'Horizontal'; [void]$h.Children.Add((New-IpStateIcon $Icon 24)); [void]$h.Children.Add((New-IpText $Title 17 'Bold' -Wrap -Margin '10,0,0,0')); [void]$p.Children.Add($h)
+    $first = $true
+    foreach ($l in $Lines) { [void]$p.Children.Add((New-IpText $l 13.5 'Normal' $(if ($first) { '' } else { $script:Col.Muted }) -Wrap -Margin $(if ($first) { '0,12,0,4' } else { '6,3,0,0' }))); $first = $false }
+    $acts = New-IpPanel 'Horizontal' '0,18,0,0'; $acts.HorizontalAlignment = 'Right'
+    $w.Tag = $null
+    foreach ($b in $Buttons) {
+        $st = if ($b[2] -eq 'Danger') { 'Primary' } else { $b[2] }
+        $bt = New-IpButton $b[1] $st $b[0] '0,0,8,0'
+        if ($b[2] -eq 'Danger') { $bt.Background = Get-IpBrush $script:Col.Err; $bt.BorderBrush = Get-IpBrush $script:Col.Err }
+        $bt.Add_Click({ param($s, $e) $win = [Windows.Window]::GetWindow($s); $win.Tag = $s.Tag; $win.DialogResult = $true })
+        [void]$acts.Children.Add($bt)
+    }
+    $no = New-IpButton 'Zpět' 'Btn' $null; $no.IsCancel = $true; [void]$acts.Children.Add($no); [void]$p.Children.Add($acts)
+    $w.Content = $p
+    if (-not [bool]$w.ShowDialog()) { return $null }
+    return $w.Tag
+}
+
+function Start-IpBkUsers {
+    $B = $script:S.B
+    if (@($script:S.Jobs | Where-Object Kind -eq 'bkusers').Count) { return }
+    $B.UsersLoading = $true
+    Start-IpJob -Kind 'bkusers' -Script $script:BkUsersJob -Params @{ Queue = $script:S.Queue }
+}
+function Start-IpBkItems { param([string] $Sid, [bool] $NoSize = $false)
+    $B = $script:S.B; $u = Get-IpBkUser $Sid; if (-not $u) { return }
+    $key = "$Sid|$NoSize"
+    if ($B.ItemsLoading.Contains($key)) { return }
+    [void]$B.ItemsLoading.Add($key)
+    Start-IpJob -Kind 'bkitems' -Script $script:BkItemsJob -Params @{ Sid = $Sid; ProfilePath = $u.ProfilePath; NoSize = $NoSize; Queue = $script:S.Queue }
+}
+function Start-IpBkList { param([string] $Single = '')
+    $B = $script:S.B
+    if ($B.ListLoading) { return }
+    $root = ([string]$B.RRoot).Trim().TrimEnd('\')
+    if (-not $Single -and -not $root) { $B.Backups = @(); $B.ListError = 'Zadejte nebo vyberte složku se zálohami.'; return }
+    $B.ListLoading = $true; $B.ListError = ''
+    Start-IpJob -Kind 'bklist' -Script $script:BkListJob -Params @{ Root = $root; Single = $Single; Queue = $script:S.Queue }
+}
+
+function Select-IpBkUser { param([string] $Sid)
+    $B = $script:S.B
+    $B.Sid = $Sid
+    if (-not $B.Items.ContainsKey($Sid)) { Start-IpBkItems -Sid $Sid }
+}
+function Select-IpBkRestoreUser { param([string] $Sid)
+    $B = $script:S.B
+    $B.RSid = $Sid
+    if ($Sid -and -not $B.Paths.ContainsKey($Sid)) { Start-IpBkItems -Sid $Sid -NoSize $true }
+}
+function Select-IpBkBackup { param([string] $Path)
+    $B = $script:S.B
+    $B.Pick = $Path; $B.RSel.Clear()
+    $bk = @($B.Backups | Where-Object Path -eq $Path)[0]
+    if (-not $bk) { return }
+    foreach ($i in @($bk.Items)) { if ([string]$i.Id -ne 'dpapi') { [void]$B.RSel.Add([string]$i.Id) } }
+    # cílový uživatel: stejný účet jako v záloze, jinak stejné jméno, jinak přihlášený / vy
+    $allowed = @($B.Users | Where-Object { Test-IpBkAllowed $_ })
+    $t = @($allowed | Where-Object Sid -eq $bk.Sid)[0]
+    if (-not $t) { $t = @($allowed | Where-Object { $_.Short -eq $bk.Short })[0] }
+    if (-not $t -and $script:S.User) { $t = @($allowed | Where-Object Sid -eq $script:S.User.Sid)[0] }
+    if (-not $t) { $t = @($allowed | Where-Object Self)[0] }
+    if ($t) { Select-IpBkRestoreUser $t.Sid }
+}
+
+function Show-IpBackupWindow { param([string] $Tab = '')
+    $B = $script:S.B
+    if ($Tab) { $B.Tab = $Tab }
+    if ($B.Win) { $B.Win.Activate() | Out-Null; return }
+    $w = New-Object Windows.Window
+    $w.Title = 'Záloha uživatele'; $w.Owner = $script:S.Win; $w.WindowStartupLocation = 'CenterOwner'
+    $wa = [Windows.SystemParameters]::WorkArea; $w.Width = [Math]::Min(1180, $wa.Width - 60); $w.Height = $wa.Height - 60
+    $w.Background = Get-IpBrush $script:Col.Bg; $w.FontFamily = 'Segoe UI'; $w.FontSize = 13.5
+    $w.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { $s.Close() } })
+    $w.Add_Closed({
+            $B = $script:S.B; $B.Win = $null; $B.ProgBar = $null; $B.ProgText = $null
+            if (-not $B.Busy) { $B.Done = $null; $B.Log.Clear(); $B.ItemState = [ordered]@{}; $B.Prog = $null; $B.Items = @{}; $B.Paths = @{} }
+        })
+    Set-IpOffscreen $w
+    $B.Win = $w
+    if (-not $B.Target) { $B.Target = Get-IpBkRememberedTarget }
+    if (-not $B.RRoot) { $B.RRoot = $B.Target }
+    if (-not $B.Users -and -not $B.UsersLoading) { Start-IpBkUsers }
+    elseif ($B.Sid -and -not $B.Items.ContainsKey($B.Sid)) { Start-IpBkItems -Sid $B.Sid }
+    if ($B.Tab -eq 'restore' -and $null -eq $B.Backups) { Start-IpBkList }
+    Update-IpBackupWindow
+    [void]$w.ShowDialog()
+}
+
+function New-IpBkHead { param([string] $Num, [string] $Text, [string] $Margin = '0,20,0,8')
+    $h = New-IpPanel 'Horizontal' $Margin
+    $c = New-IpText $Num 12 'Bold' '#FFFFFF'; $c.HorizontalAlignment = 'Center'; $c.VerticalAlignment = 'Center'
+    $o = New-IpBorder -Child $c -Bg $script:Col.Accent -Radius 11; $o.Width = 22; $o.Height = 22
+    [void]$h.Children.Add($o); $t = New-IpText $Text 16 'Bold' -Margin '10,0,0,0'; $t.VerticalAlignment = 'Center'; [void]$h.Children.Add($t)
+    return $h
+}
+function New-IpBkNote { param([string] $Text, [string] $Kind = 'info', [string] $Margin = '0,0,0,10')
+    $fg = @{ info = ''; warn = $script:Col.Warn; err = $script:Col.Err }[$Kind]
+    $bg = @{ info = $script:Col.Surface2; warn = $script:Col.WarnSoft; err = $script:Col.ErrSoft }[$Kind]
+    $b = New-IpBorder -Child (New-IpText $Text 13 'Normal' $fg -Wrap) -Bg $bg -Radius 8 -Padding '12,10' -Margin $Margin
+    if ($Kind -eq 'info') { $b.BorderBrush = Get-IpBrush $script:Col.Line2; $b.BorderThickness = '1' }
+    return $b
+}
+function New-IpBkUserCell { param($U)
+    $c = New-IpPanel
+    [void]$c.Children.Add((New-IpText ($U.Name + $(if ($U.Self) { '  (vy)' } else { '' })) 14 'SemiBold' -Wrap))
+    $chips = New-IpPanel 'Horizontal' '0,3,0,0'
+    switch ($U.Kind) {
+        'domain' { [void]$chips.Children.Add((New-IpChip 'DOMÉNOVÝ' $script:Col.Accent $script:Col.AccentSoft)) }
+        'local' { [void]$chips.Children.Add((New-IpChip 'MÍSTNÍ' $script:Col.Muted $script:Col.Surface2)) }
+        'aad' { [void]$chips.Children.Add((New-IpChip 'ENTRA ID' $script:Col.Accent $script:Col.AccentSoft)) }
+    }
+    if ($U.LoggedOn) { [void]$chips.Children.Add((New-IpChip 'PŘIHLÁŠEN' $script:Col.Ok $script:Col.OkSoft)) }
+    [void]$c.Children.Add($chips)
+    return $c
+}
+
+function Update-IpBkProgress {
+    # Jen průběh (časté události) – bez překreslení celého okna.
+    $B = $script:S.B; $pg = $B.Prog
+    if (-not $B.ProgBar -or -not $pg) { return }
+    if ([long]$pg.Total -gt 0) { $B.ProgBar.IsIndeterminate = $false; $B.ProgBar.Value = [Math]::Min(100, 100.0 * [long]$pg.Done / [long]$pg.Total) }
+    else { $B.ProgBar.IsIndeterminate = $true }
+    $of = if ([long]$pg.Total -gt 0) { " z $(Format-IpSize ([long]$pg.Total))" } else { '' }
+    $f = if ($pg.File) { "  ·  $([IO.Path]::GetFileName([string]$pg.File))" } else { '' }
+    $B.ProgText.Text = "$($pg.Name)  ·  celkem $(Format-IpSize ([long]$pg.Done))$of$f"
+}
+
+function Add-IpBkProgressBlock { param($Panel)
+    # Průběh a výsledek (záloha i obnova).
+    $B = $script:S.B
+    if (-not ($B.Busy -or $B.Done -or $B.Log.Count)) { return }
+    [void]$Panel.Children.Add((New-IpText $(if ($B.Busy) { if ($B.Op -eq 'backup') { 'Probíhá záloha' } else { 'Probíhá obnova' } } else { 'Výsledek' }) 16 'Bold' -Margin '0,22,0,6'))
+    $rp = New-IpPanel -Margin '14,12,14,12'
+    if ($B.Busy) {
+        $pt = New-IpText 'Připravuji…' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '0,0,0,6'
+        $pb = New-Object Windows.Controls.ProgressBar; $pb.Height = 8; $pb.Foreground = Get-IpBrush $script:Col.Accent; $pb.Background = Get-IpBrush $script:Col.Surface2; $pb.BorderThickness = '0'; $pb.IsIndeterminate = $true; $pb.Margin = '0,0,0,10'
+        [void]$rp.Children.Add($pt); [void]$rp.Children.Add($pb); $B.ProgText = $pt; $B.ProgBar = $pb
+        Update-IpBkProgress
+    }
+    else { $B.ProgBar = $null; $B.ProgText = $null }
+    foreach ($k in @($B.ItemState.Keys)) {
+        $st = $B.ItemState[$k]
+        $ic = switch ($st[0]) { 'ok' { 'ok' } 'warn' { 'warn' } 'err' { 'err' } 'run' { 'run' } 'cancel' { 'warn' } default { 'na' } }
+        $h = New-IpPanel 'Horizontal' '0,0,0,6'; [void]$h.Children.Add((New-IpStateIcon $ic 20))
+        $tp = New-IpPanel -Margin '8,1,0,0'; [void]$tp.Children.Add((New-IpText $st[1] 13.5 'SemiBold' -Wrap))
+        if ($st[2]) { [void]$tp.Children.Add((New-IpText $st[2] 12.5 'Normal' $(if ($ic -eq 'err') { $script:Col.Err } elseif ($ic -eq 'warn') { $script:Col.Warn } else { $script:Col.Muted }) -Wrap)) }
+        [void]$h.Children.Add($tp); [void]$rp.Children.Add($h)
+    }
+    if ($B.Done) {
+        $bad = @($B.Done.Results | Where-Object { $_.Result -eq 'err' }).Count
+        $warn = @($B.Done.Results | Where-Object { $_.Result -in @('warn', 'cancel') }).Count
+        $msg = if ($bad) { "$bad $(Get-IpPlural $bad 'položka selhala' 'položky selhaly' 'položek selhalo') – podrobnosti výše a v logu." } elseif ($warn) { 'Hotovo s upozorněním – podrobnosti výše.' } else { 'Hotovo.' }
+        [void]$rp.Children.Add((New-IpText $msg 13.5 'SemiBold' $(if ($bad) { $script:Col.Err } elseif ($warn) { $script:Col.Warn } else { $script:Col.Ok }) -Wrap -Margin '0,6,0,0'))
+        if ($B.Done.Path) {
+            $ob = New-IpButton $(if ($B.Done.Op -eq 'backup') { 'Otevřít složku zálohy' } else { 'Otevřít zálohu' }) 'Btn' $B.Done.Path '0,10,0,0' '12,5'; $ob.HorizontalAlignment = 'Left'
+            $ob.Add_Click({ param($s, $e) Invoke-IpSafe { if (Test-Path -LiteralPath $s.Tag) { Start-Process explorer.exe -ArgumentList "`"$($s.Tag)`"" } else { Show-IpToast 'Složka není dostupná.' } } })
+            [void]$rp.Children.Add($ob)
+        }
+    }
+    if ($B.Log.Count) {
+        $ex = New-Object Windows.Controls.Expander; $ex.Header = 'Podrobný průběh'; $ex.Margin = '0,10,0,0'; $ex.IsExpanded = [bool]$B.LogOpen
+        $ex.Add_Expanded({ $script:S.B.LogOpen = $true }); $ex.Add_Collapsed({ $script:S.B.LogOpen = $false })
+        $lp = New-IpPanel -Margin '0,6,0,0'
+        foreach ($x in @($B.Log | Select-Object -Last 60)) {
+            $col = switch ($x.Level) { 'Error' { $script:Col.Err } 'Warning' { $script:Col.Warn } 'Success' { $script:Col.Ok } default { $script:Col.Muted } }
+            [void]$lp.Children.Add((New-IpText $x.Message 12.5 'Normal' $col -Wrap -Margin '0,1,0,0'))
+        }
+        $ex.Content = $lp; [void]$rp.Children.Add($ex)
+    }
+    [void]$Panel.Children.Add((New-IpBorder -Child $rp -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10))
+}
+
+function Add-IpBkBackupTab { param($d)
+    $B = $script:S.B
+    [void]$d.Children.Add((New-IpBkNote 'Zkopíruje data uživatele do složky na NAS (nebo na disk / USB): plochu, dokumenty, stažené soubory a profily prohlížečů. Na novém počítači je pak obnovíte na kartě Obnovit ze zálohy. Na původním PC se nic nemaže ani nemění.'))
+    if (-not $script:S.IsAdmin) { [void]$d.Children.Add((New-IpBkNote 'Aplikace neběží jako správce – zálohovat jde jen váš vlastní profil. Profily ostatních zálohuje IT (aplikace spuštěná jako správce).' 'warn')) }
+
+    # 1 uživatel
+    [void]$d.Children.Add((New-IpBkHead '1' 'Vyberte uživatele' '0,8,0,8'))
+    if ($B.Error) { [void]$d.Children.Add((New-IpBkNote "Seznam uživatelů nejde načíst: $($B.Error)" 'err')) }
+    $tbl = New-IpPanel
+    if (-not $B.Users) { [void]$tbl.Children.Add((New-IpText $(if ($B.UsersLoading) { 'Načítám uživatele počítače…' } else { 'Na počítači nejsou žádné uživatelské profily.' }) 13 'Normal' $script:Col.Muted -Margin '14,12,14,12')) }
+    foreach ($u in @($B.Users)) {
+        $ok = Test-IpBkAllowed $u
+        $g = New-Object Windows.Controls.Grid; $g.Margin = '10,9,14,9'
+        foreach ($wd in @('34', '2*', '3*')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $g.ColumnDefinitions.Add($cd) }
+        $rb = New-Object Windows.Controls.RadioButton; $rb.GroupName = 'bkuser'; $rb.Tag = $u.Sid; $rb.VerticalAlignment = 'Top'; $rb.Margin = '4,3,0,0'
+        $rb.IsChecked = $u.Sid -eq $B.Sid; $rb.IsEnabled = $ok -and -not $B.Busy
+        if (-not $ok) { $rb.ToolTip = 'Bez práv správce jen vlastní profil.' }
+        $rb.Add_Checked({ param($s, $e) Invoke-IpSafe { if ($script:S.B.Sid -ne [string]$s.Tag) { Select-IpBkUser ([string]$s.Tag); Update-IpBackupWindow } } })
+        [void]$g.Children.Add($rb)
+        $c1 = New-IpBkUserCell $u; [Windows.Controls.Grid]::SetColumn($c1, 1); [void]$g.Children.Add($c1)
+        $c2 = New-IpPanel; $c2.Margin = '12,0,0,0'; [Windows.Controls.Grid]::SetColumn($c2, 2)
+        [void]$c2.Children.Add((New-IpText $u.ProfilePath 12.5 'Normal' '' -Font 'Consolas' -Wrap))
+        if ($u.LastUse) { [void]$c2.Children.Add((New-IpText ("Naposledy přihlášen {0:d. M. yyyy}" -f $u.LastUse) 12 'Normal' $script:Col.Muted)) }
+        [void]$g.Children.Add($c2)
+        $row = New-IpBorder -Child $g -BorderColor $script:Col.Line2 -Thickness '0,1,0,0' -Bg $(if ($u.Sid -eq $B.Sid) { '#F2F9FA' } else { 'Transparent' })
+        if (-not $ok) { $row.Opacity = 0.55 }
+        [void]$tbl.Children.Add($row)
+    }
+    [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
+
+    # 2 co zálohovat
+    [void]$d.Children.Add((New-IpBkHead '2' 'Co zálohovat'))
+    $u = Get-IpBkUser $B.Sid
+    if (-not $u) { [void]$d.Children.Add((New-IpText 'Nejdřív vyberte uživatele.' 13 'Normal' $script:Col.Muted -Margin '4,0,0,0')) }
+    else {
+        $entry = $B.Items[$B.Sid]
+        $loading = $B.ItemsLoading.Contains("$($B.Sid)|False")
+        if (-not $entry) { [void]$d.Children.Add((New-IpText 'Zjišťuji složky uživatele, prohlížeče a velikosti… (u velkých profilů to může trvat i minutu)' 13 'Normal' $script:Col.Muted -Margin '4,0,0,0')) }
+        else {
+            if ($entry.Error) { [void]$d.Children.Add((New-IpBkNote "Složky nejde zjistit: $($entry.Error)" 'err')) }
+            $sel = $B.SelBy[$B.Sid]
+            $tbl = New-IpPanel
+            $hg = New-Object Windows.Controls.Grid; $hg.Margin = '14,8,14,4'
+            $i = 0; foreach ($x in @(@('230', 'POLOŽKA'), @('*', 'ODKUD'), @('300', 'CO ZKOPÍROVAT'), @('110', 'VELIKOST'))) {
+                $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $x[0]; $hg.ColumnDefinitions.Add($cd)
+                $t = New-IpText $x[1] 11 'SemiBold' $script:Col.Muted; [Windows.Controls.Grid]::SetColumn($t, $i); if ($i -gt 0) { $t.Margin = '12,0,0,0' }; [void]$hg.Children.Add($t); $i++
+            }
+            [void]$tbl.Children.Add($hg)
+            $hasBrowser = $false
+            foreach ($it in @($entry.Items)) {
+                $mode = if ($sel.ContainsKey($it.Id)) { [string]$sel[$it.Id] } else { '' }
+                $g = New-Object Windows.Controls.Grid; $g.Margin = '14,8,14,8'
+                foreach ($wd in @('230', '*', '300', '110')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $g.ColumnDefinitions.Add($cd) }
+                $c1 = New-IpPanel
+                [void]$c1.Children.Add((New-IpText $it.Name 14 'SemiBold'))
+                $chips = New-IpPanel 'Horizontal' '0,3,0,0'
+                if ($it.Group -eq 'folder' -and -not $it.Exists) { [void]$chips.Children.Add((New-IpChip 'NEEXISTUJE' $script:Col.Muted $script:Col.Surface2)) }
+                if ($it.Remote) { [void]$chips.Children.Add((New-IpChip 'NA SERVERU' $script:Col.Muted $script:Col.Surface2 'Složka je přesměrovaná na server – data jsou zálohovaná tam, není třeba je kopírovat.')) }
+                if ($it.OneDrive) { [void]$chips.Children.Add((New-IpChip 'ONEDRIVE' $script:Col.Accent $script:Col.AccentSoft 'Složka se synchronizuje s OneDrive. Zkopírují se soubory uložené v PC; soubory jen v cloudu se nekopírují (jsou v OneDrive).')) }
+                if ($it.Running) { [void]$chips.Children.Add((New-IpChip 'SPUŠTĚNÝ' $script:Col.Warn $script:Col.WarnSoft 'Prohlížeč je spuštěný. Před zálohou ho aplikace nabídne zavřít – otevřené soubory (hesla, historie) by nešly zkopírovat.')) }
+                if ($chips.Children.Count) { [void]$c1.Children.Add($chips) }
+                [void]$g.Children.Add($c1)
+                $c2 = New-IpPanel; $c2.Margin = '12,0,0,0'; [Windows.Controls.Grid]::SetColumn($c2, 1)
+                [void]$c2.Children.Add((New-IpText $it.Path 12 'Normal' $script:Col.Muted -Font 'Consolas' -Wrap))
+                if (@($it.Profiles).Count) { [void]$c2.Children.Add((New-IpText ("Profily: " + (@($it.Profiles) -join ', ')) 12.5 'Normal' '' -Wrap -Margin '0,2,0,0')) }
+                [void]$g.Children.Add($c2)
+                $canUse = $it.Exists -and -not $it.Remote -and -not $B.Busy
+                if ($it.Group -eq 'folder') {
+                    $hasFolder = $true
+                    $ch = New-Object Windows.Controls.CheckBox; $ch.Content = 'zálohovat celou složku'; $ch.Tag = $it.Id; $ch.IsChecked = [bool]$mode; $ch.IsEnabled = $canUse; $ch.VerticalAlignment = 'Top'; $ch.Margin = '12,2,0,0'
+                    $ch.Add_Click({ param($s, $e) Invoke-IpSafe { $sel = $script:S.B.SelBy[$script:S.B.Sid]; if ($s.IsChecked) { $sel[[string]$s.Tag] = 'on' } else { [void]$sel.Remove([string]$s.Tag) }; Update-IpBackupWindow } })
+                    [Windows.Controls.Grid]::SetColumn($ch, 2); [void]$g.Children.Add($ch)
+                }
+                else {
+                    $hasBrowser = $true
+                    $opts = @(, @('', 'Nezálohovat')) + @(, @('bookmarks', 'Jen záložky')) + @(, @('full', 'Celý profil – záložky, hesla, historie, rozšíření'))
+                    $cb = New-IpCombo -Options $opts -Selected $mode -Tag $it.Id -Enabled $canUse -Width 290 -OnChange { param($s, $e) Invoke-IpSafe {
+                            $sel = $script:S.B.SelBy[$script:S.B.Sid]; $v = [string]$s.SelectedItem.Tag
+                            if ($v) { $sel[[string]$s.Tag] = $v } else { [void]$sel.Remove([string]$s.Tag) }; Update-IpBackupWindow } }
+                    $cb.Margin = '12,0,0,0'; [Windows.Controls.Grid]::SetColumn($cb, 2); [void]$g.Children.Add($cb)
+                }
+                $sz = New-IpText $(if ($mode -or $it.Group -eq 'folder') { Get-IpBkSizeText $it $(if ($mode) { $mode } else { 'full' }) $loading } else { '' }) 13 'SemiBold' $(if ($mode) { '' } else { $script:Col.Muted })
+                $sz.HorizontalAlignment = 'Right'; [Windows.Controls.Grid]::SetColumn($sz, 3); [void]$g.Children.Add($sz)
+                [void]$tbl.Children.Add((New-IpBorder -Child $g -BorderColor $script:Col.Line2 -Thickness '0,1,0,0' -Bg $(if ($mode) { '#F2F9FA' } else { 'Transparent' })))
+            }
+            if (-not $hasBrowser) { [void]$tbl.Children.Add((New-IpBorder -Child (New-IpText 'Prohlížeče: u uživatele nejsou data Chrome, Edge, Brave, Opera ani Firefox.' 13 'Normal' $script:Col.Muted -Wrap) -BorderColor $script:Col.Line2 -Thickness '0,1,0,0' -Padding '14,10')) }
+            [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
+            if ($hasBrowser) {
+                [void]$d.Children.Add((New-IpText 'Celý profil prohlížeče = záložky, uložená hesla, historie, rozšíření a nastavení (bez mezipaměti). Hesla Chrome / Edge / Brave / Opera jsou šifrovaná klíčem účtu Windows – zálohují se s nimi i klíče (DPAPI) a na novém PC je přečte STEJNÝ doménový účet. Pro jiný nebo místní účet přeneste hesla synchronizací prohlížeče (přihlášení do Google / Microsoft účtu) nebo exportem do CSV. Firefox přenese hesla vždy. Přihlášení na webech (cookies) se většinou nepřenese – bude potřeba se přihlásit znovu.' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '4,8,0,0'))
+            }
+        }
+    }
+
+    # 3 kam
+    [void]$d.Children.Add((New-IpBkHead '3' 'Kam zálohu uložit'))
+    $kp = New-IpPanel -Margin '14,12,14,12'
+    $row = New-Object Windows.Controls.DockPanel
+    $bp = New-IpPanel 'Horizontal'; [Windows.Controls.DockPanel]::SetDock($bp, 'Right')
+    $bb = New-IpButton 'Vybrat složku…' 'Btn' $null '8,0,0,0' '12,5'; $bb.IsEnabled = -not $B.Busy
+    $bb.Add_Click({ Invoke-IpSafe { $p = Select-IpFolder -Start $script:S.B.Target -Text 'Kam uložit zálohu uživatele (NAS, disk nebo USB)'; if ($p) { $script:S.B.Target = $p; Update-IpBackupWindow } } })
+    [void]$bp.Children.Add($bb)
+    if ($script:S.Settings.BackupRoot) {
+        $bd = New-IpButton 'Výchozí (NAS)' 'Btn' $null '8,0,0,0' '12,5'; $bd.IsEnabled = -not $B.Busy -and $B.Target -ne $script:S.Settings.BackupRoot
+        $bd.ToolTip = $script:S.Settings.BackupRoot
+        $bd.Add_Click({ Invoke-IpSafe { $script:S.B.Target = $script:S.Settings.BackupRoot; Update-IpBackupWindow } })
+        [void]$bp.Children.Add($bd)
+    }
+    [void]$row.Children.Add($bp)
+    $tb = New-Object Windows.Controls.TextBox; $tb.Padding = '8,5'; $tb.Text = [string]$B.Target; $tb.FontFamily = 'Consolas'; $tb.BorderBrush = Get-IpBrush $script:Col.Line; $tb.IsEnabled = -not $B.Busy
+    $tb.Add_TextChanged({ param($s, $e) $script:S.B.Target = $s.Text; Update-IpBkFooter })
+    [void]$row.Children.Add($tb); [void]$kp.Children.Add($row)
+    $short = if ($u) { $u.Short -replace '[\\/:*?"<>|\s]+', '-' } else { 'uzivatel' }
+    $tgt = ([string]$B.Target).Trim().TrimEnd('\')
+    [void]$kp.Children.Add((New-IpText $(if ($tgt) { "Vytvoří se složka:  $tgt\$([Environment]::MachineName)_$($short)_<datum-čas>" } else { 'Zadejte cestu nebo klikněte na Vybrat složku. Může to být NAS (\\server\...), jiný disk nebo USB.' }) 12.5 'Normal' $script:Col.Muted -Font $(if ($tgt) { 'Consolas' } else { '' }) -Wrap -Margin '0,8,0,0'))
+    [void]$kp.Children.Add((New-IpText 'Záloha obsahuje hesla – přístup k ní se po dokončení omezí na správce, vás a vlastníka dat. Neukládejte ji tam, kam mají přístup ostatní.' 12.5 'Normal' $script:Col.Warn -Wrap -Margin '0,4,0,0'))
+    [void]$d.Children.Add((New-IpBorder -Child $kp -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10))
+}
+
+function Add-IpBkRestoreTab { param($d)
+    $B = $script:S.B
+    [void]$d.Children.Add((New-IpBkNote 'Nahraje data ze zálohy do profilu uživatele na TOMTO počítači. Uživatel se tu musí aspoň jednou přihlásit (aby měl profil). Novější soubory na tomto PC se nepřepíší. Profil prohlížeče se před obnovou celého profilu jen odloží (přejmenuje na *.pred-obnovou-…), nic se nemaže.'))
+    if (-not $script:S.IsAdmin) { [void]$d.Children.Add((New-IpBkNote 'Aplikace neběží jako správce – obnovit jde jen do vašeho vlastního profilu.' 'warn')) }
+
+    # 1 záloha
+    [void]$d.Children.Add((New-IpBkHead '1' 'Vyberte zálohu' '0,8,0,8'))
+    $kp = New-IpPanel -Margin '14,12,14,12'
+    $row = New-Object Windows.Controls.DockPanel
+    $bp = New-IpPanel 'Horizontal'; [Windows.Controls.DockPanel]::SetDock($bp, 'Right')
+    $bl = New-IpButton $(if ($B.ListLoading) { 'Načítám…' } else { 'Načíst' }) 'Btn' $null '8,0,0,0' '12,5'; $bl.IsEnabled = -not $B.Busy -and -not $B.ListLoading
+    $bl.Add_Click({ Invoke-IpSafe { Start-IpBkList; Update-IpBackupWindow } })
+    $bb = New-IpButton 'Vybrat složku…' 'Btn' $null '8,0,0,0' '12,5'; $bb.IsEnabled = -not $B.Busy -and -not $B.ListLoading
+    $bb.ToolTip = 'Složku se zálohami (seznam), nebo přímo jednu zálohu (složku s backup.json)'
+    $bb.Add_Click({ Invoke-IpSafe {
+            $p = Select-IpFolder -Start $script:S.B.RRoot -Text 'Složka se zálohami, nebo přímo jedna záloha (složka se souborem backup.json)'
+            if (-not $p) { return }
+            if (Test-Path -LiteralPath (Join-Path $p 'backup.json')) { Start-IpBkList -Single $p } else { $script:S.B.RRoot = $p; Start-IpBkList }
+            Update-IpBackupWindow } })
+    [void]$bp.Children.Add($bl); [void]$bp.Children.Add($bb); [void]$row.Children.Add($bp)
+    $tb = New-Object Windows.Controls.TextBox; $tb.Padding = '8,5'; $tb.Text = [string]$B.RRoot; $tb.FontFamily = 'Consolas'; $tb.BorderBrush = Get-IpBrush $script:Col.Line; $tb.IsEnabled = -not $B.Busy
+    $tb.Add_TextChanged({ param($s, $e) $script:S.B.RRoot = $s.Text })
+    $tb.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { Invoke-IpSafe { $script:S.B.RRoot = $s.Text; Start-IpBkList; Update-IpBackupWindow } } })
+    [void]$row.Children.Add($tb); [void]$kp.Children.Add($row)
+    if ($B.ListError) { [void]$kp.Children.Add((New-IpText $B.ListError 13 'Normal' $script:Col.Err -Wrap -Margin '0,8,0,0')) }
+    [void]$d.Children.Add((New-IpBorder -Child $kp -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Margin '0,0,0,8'))
+
+    $list = @($B.Backups)
+    if ($B.ListLoading -and -not $list.Count) { [void]$d.Children.Add((New-IpText 'Hledám zálohy…' 13 'Normal' $script:Col.Muted -Margin '4,4,0,0')) }
+    elseif ($null -ne $B.Backups -and -not $list.Count -and -not $B.ListError) { [void]$d.Children.Add((New-IpText 'Ve složce nejsou žádné zálohy (podsložky se souborem backup.json).' 13 'Normal' $script:Col.Muted -Margin '4,4,0,0')) }
+    if ($list.Count) {
+        $tbl = New-IpPanel
+        foreach ($bk in @($list | Select-Object -First 60)) {
+            $g = New-Object Windows.Controls.Grid; $g.Margin = '10,9,14,9'
+            foreach ($wd in @('34', '2*', '3*', '100')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $g.ColumnDefinitions.Add($cd) }
+            $rb = New-Object Windows.Controls.RadioButton; $rb.GroupName = 'bkpick'; $rb.Tag = $bk.Path; $rb.VerticalAlignment = 'Top'; $rb.Margin = '4,3,0,0'
+            $rb.IsChecked = $bk.Path -eq $B.Pick; $rb.IsEnabled = -not $B.Busy
+            $rb.Add_Checked({ param($s, $e) Invoke-IpSafe { if ($script:S.B.Pick -ne [string]$s.Tag) { Select-IpBkBackup ([string]$s.Tag); Update-IpBackupWindow } } })
+            [void]$g.Children.Add($rb)
+            $c1 = New-IpPanel; [Windows.Controls.Grid]::SetColumn($c1, 1)
+            [void]$c1.Children.Add((New-IpText $bk.User 14 'SemiBold' -Wrap))
+            [void]$c1.Children.Add((New-IpText ("z PC {0} · {1}" -f $bk.Computer, $(if ($bk.Created) { $bk.Created.ToString('d. M. yyyy H:mm') } else { '?' })) 12.5 'Normal' $script:Col.Muted -Wrap))
+            if ($bk.State -and $bk.State -ne 'ok') {
+                $cp = New-IpPanel 'Horizontal' '0,3,0,0'
+                $lbl = @{ warnings = @('S UPOZORNĚNÍM', $script:Col.Warn, $script:Col.WarnSoft); errors = @('NEÚPLNÁ', $script:Col.Err, $script:Col.ErrSoft); cancelled = @('ZASTAVENÁ', $script:Col.Warn, $script:Col.WarnSoft); running = @('NEDOKONČENÁ', $script:Col.Err, $script:Col.ErrSoft) }[$bk.State]
+                if ($lbl) { [void]$cp.Children.Add((New-IpChip $lbl[0] $lbl[1] $lbl[2])); [void]$c1.Children.Add($cp) }
+            }
+            [void]$g.Children.Add($c1)
+            $c2 = New-IpPanel; $c2.Margin = '12,0,0,0'; [Windows.Controls.Grid]::SetColumn($c2, 2)
+            [void]$c2.Children.Add((New-IpText ((@($bk.Items | Where-Object { [string]$_.Id -ne 'dpapi' } | ForEach-Object { $n = [string]$_.Name; if ([string]$_.Mode -eq 'bookmarks') { "$n (záložky)" } else { $n } })) -join ', ') 13 'Normal' '' -Wrap))
+            [void]$c2.Children.Add((New-IpText $bk.Path 11.5 'Normal' $script:Col.Muted -Font 'Consolas' -Wrap))
+            [void]$g.Children.Add($c2)
+            $sz = New-IpText (Format-IpSize $bk.Size) 13 'SemiBold'; $sz.HorizontalAlignment = 'Right'; [Windows.Controls.Grid]::SetColumn($sz, 3); [void]$g.Children.Add($sz)
+            [void]$tbl.Children.Add((New-IpBorder -Child $g -BorderColor $script:Col.Line2 -Thickness '0,1,0,0' -Bg $(if ($bk.Path -eq $B.Pick) { '#F2F9FA' } else { 'Transparent' })))
+        }
+        [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
+    }
+
+    $bk = @($list | Where-Object Path -eq $B.Pick)[0]
+    # 2 pro koho
+    [void]$d.Children.Add((New-IpBkHead '2' 'Do profilu uživatele na tomto PC'))
+    if (-not $bk) { [void]$d.Children.Add((New-IpText 'Nejdřív vyberte zálohu.' 13 'Normal' $script:Col.Muted -Margin '4,0,0,0')); return }
+    $allowed = @($B.Users | Where-Object { Test-IpBkAllowed $_ })
+    $opts = @(foreach ($u in $allowed) { , @($u.Sid, "$($u.Name)$(if ($u.Self) { '  (vy)' })$(if ($u.LoggedOn) { '  · přihlášen' })") })
+    if (-not $opts.Count) { [void]$d.Children.Add((New-IpText 'Na tomto PC není profil, do kterého by šlo obnovit.' 13 'Normal' $script:Col.Err -Margin '4,0,0,0')); return }
+    $cb = New-IpCombo -Options $opts -Selected $B.RSid -Tag 'rsid' -Enabled (-not $B.Busy) -Width 460 -OnChange { param($s, $e) Invoke-IpSafe { Select-IpBkRestoreUser ([string]$s.SelectedItem.Tag); Update-IpBackupWindow } }
+    $cb.HorizontalAlignment = 'Left'
+    if (-not $B.RSid -and $cb.SelectedItem) { $B.RSid = [string]$cb.SelectedItem.Tag; Select-IpBkRestoreUser $B.RSid }
+    [void]$d.Children.Add($cb)
+    [void]$d.Children.Add((New-IpText 'Uživatel, který tu ještě není, se musí na tomto PC jednou přihlásit a odhlásit – pak se objeví v seznamu.' 12.5 'Normal' $script:Col.Muted -Wrap -Margin '4,6,0,0'))
+    $tu = Get-IpBkUser $B.RSid
+    if ($tu -and $bk.Sid -and $tu.Sid -ne $bk.Sid -and @($bk.Items | Where-Object { [string]$_.Mode -eq 'full' -and [string]$_.Id -in @('chrome', 'edge', 'brave', 'opera') }).Count) {
+        [void]$d.Children.Add((New-IpBkNote "Jiný účet, než ze kterého je záloha ($($bk.User)). Záložky, historie a rozšíření se přenesou, ale hesla Chrome / Edge / Brave / Opera nepůjdou přečíst – přeneste je synchronizací prohlížeče nebo exportem do CSV. Hesla Firefoxu se přenesou." 'warn' '0,8,0,0'))
+    }
+
+    # 3 co obnovit
+    [void]$d.Children.Add((New-IpBkHead '3' 'Co obnovit'))
+    $paths = if ($B.RSid -and $B.Paths.ContainsKey($B.RSid)) { @($B.Paths[$B.RSid].Items) } else { @() }
+    $tbl = New-IpPanel
+    foreach ($it in @($bk.Items | Where-Object { [string]$_.Id -ne 'dpapi' })) {
+        $id = [string]$it.Id
+        $g = New-Object Windows.Controls.Grid; $g.Margin = '14,8,14,8'
+        foreach ($wd in @('300', '*', '110')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $g.ColumnDefinitions.Add($cd) }
+        $label = [string]$it.Name + $(if ([string]$it.Mode -eq 'bookmarks') { ' – jen záložky' } elseif ([string]$it.Group -eq 'browser') { ' – celý profil' } else { '' })
+        $ch = New-Object Windows.Controls.CheckBox; $ch.Content = $label; $ch.Tag = $id; $ch.IsChecked = $B.RSel.Contains($id); $ch.IsEnabled = -not $B.Busy; $ch.FontWeight = 'SemiBold'
+        $ch.Add_Click({ param($s, $e) Invoke-IpSafe { if ($s.IsChecked) { [void]$script:S.B.RSel.Add([string]$s.Tag) } else { [void]$script:S.B.RSel.Remove([string]$s.Tag) }; Update-IpBkFooter } })
+        [void]$g.Children.Add($ch)
+        $t = @($paths | Where-Object Id -eq $id)[0]
+        $where = if ($t) { "→ $($t.Path)" } elseif ([string]$it.Group -eq 'browser' -and $tu) { '→ profil prohlížeče uživatele' } elseif ($B.RSid) { '→ zjišťuji…' } else { '' }
+        $c2 = New-IpPanel; $c2.Margin = '12,0,0,0'; [Windows.Controls.Grid]::SetColumn($c2, 1)
+        [void]$c2.Children.Add((New-IpText $where 12 'Normal' $script:Col.Muted -Font 'Consolas' -Wrap))
+        if ([string]$it.Result -eq 'warn') { [void]$c2.Children.Add((New-IpText "Při záloze: $($it.Message)" 12 'Normal' $script:Col.Warn -Wrap)) }
+        if ($t -and $t.Running) { [void]$c2.Children.Add((New-IpText 'Prohlížeč je u uživatele spuštěný – před obnovou se zavře.' 12 'Normal' $script:Col.Warn -Wrap)) }
+        [void]$g.Children.Add($c2)
+        $sz = New-IpText (Format-IpSize ([long](Get-IpValue $it 'Size' 0))) 13 'SemiBold'; $sz.HorizontalAlignment = 'Right'; [Windows.Controls.Grid]::SetColumn($sz, 2); [void]$g.Children.Add($sz)
+        [void]$tbl.Children.Add((New-IpBorder -Child $g -BorderColor $script:Col.Line2 -Thickness '0,1,0,0'))
+    }
+    [void]$d.Children.Add((New-IpBorder -Child $tbl -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10 -Padding '0,0,0,2'))
+}
+
+function Update-IpBkFooter {
+    $B = $script:S.B
+    if (-not $B.SumText) { return }
+    if ($B.Busy) {
+        $B.SumText.Text = 'Pracuji… Okno můžete zavřít, kopírování poběží dál na pozadí.'
+        $B.GoBtn.Content = 'Pracuji…'; $B.GoBtn.IsEnabled = $false; $B.StopBtn.Visibility = 'Visible'
+        return
+    }
+    $B.StopBtn.Visibility = 'Collapsed'
+    if ($B.Tab -eq 'backup') {
+        $sel = if ($B.Sid -and $B.SelBy.ContainsKey($B.Sid)) { $B.SelBy[$B.Sid] } else { @{} }
+        $items = if ($B.Sid -and $B.Items.ContainsKey($B.Sid)) { @($B.Items[$B.Sid].Items) } else { @() }
+        $n = 0; $sum = [long]0; $unk = $false
+        foreach ($it in $items) { if ($sel.ContainsKey($it.Id) -and $sel[$it.Id]) { $n++; $s = Get-IpBkItemSize $it ([string]$sel[$it.Id]); if ($s -ge 0) { $sum += $s } else { $unk = $true } } }
+        $tgt = ([string]$B.Target).Trim()
+        $B.SumText.Text = if (-not $B.Sid) { 'Vyberte uživatele.' } elseif (-not $n) { 'Vyberte, co zálohovat.' } elseif (-not $tgt) { 'Vyberte, kam zálohu uložit.' } else { "Vybráno: $n $(Get-IpPlural $n 'položka' 'položky' 'položek') · $(Format-IpSize $sum)$(if ($unk) { ' a víc' })" }
+        $B.GoBtn.Content = 'Zálohovat'
+        $B.GoBtn.IsEnabled = [bool]($B.Sid -and $n -and $tgt) -and -not (Test-IpBusy)
+    }
+    else {
+        $n = $B.RSel.Count
+        $B.SumText.Text = if (-not $B.Pick) { 'Vyberte zálohu.' } elseif (-not $B.RSid) { 'Vyberte uživatele, do jehož profilu obnovit.' } elseif (-not $n) { 'Vyberte, co obnovit.' } else { "Obnovit: $n $(Get-IpPlural $n 'položka' 'položky' 'položek')" }
+        $B.GoBtn.Content = 'Obnovit'
+        $B.GoBtn.IsEnabled = [bool]($B.Pick -and $B.RSid -and $n) -and -not (Test-IpBusy)
+    }
+}
+
+function Update-IpBackupWindow {
+    $B = $script:S.B; $w = $B.Win; if (-not $w) { return }
+    $off = if ($B.Scroll) { $B.Scroll.VerticalOffset } else { 0 }
+    $d = New-IpPanel -Margin '26,20,26,24'
+    [void]$d.Children.Add((New-IpText 'Záloha a přenos dat uživatele' 22 'Bold'))
+    $how = if ($script:S.IsAdmin) { 'jako správce – jde zálohovat a obnovit kteréhokoli uživatele' } else { 'bez práv správce – jen váš profil' }
+    [void]$d.Children.Add((New-IpText "Počítač $([Environment]::MachineName) · $how · kopíruje robocopy (Windows 10 i 11)" 12.5 'Normal' $script:Col.Muted -Wrap -Margin '0,2,0,12'))
+    $seg = New-IpPanel 'Horizontal' '0,0,0,14'
+    foreach ($t in @(@('backup', 'Zálohovat'), @('restore', 'Obnovit ze zálohy'))) {
+        $rb = New-Object Windows.Controls.RadioButton; $rb.Style = $script:S.Win.FindResource('Seg'); $rb.GroupName = 'bktab'; $rb.Content = $t[1]; $rb.Tag = $t[0]
+        $rb.IsChecked = $B.Tab -eq $t[0]; $rb.IsEnabled = -not $B.Busy
+        if ($t[0] -eq 'restore') { $rb.BorderThickness = '1' }
+        $rb.Add_Checked({ param($s, $e) Invoke-IpSafe {
+                $B = $script:S.B; if ($B.Tab -eq [string]$s.Tag) { return }
+                $B.Tab = [string]$s.Tag
+                if (-not $B.Busy) { $B.Done = $null; $B.Log.Clear(); $B.ItemState = [ordered]@{} }
+                if ($B.Tab -eq 'restore' -and $null -eq $B.Backups) { Start-IpBkList }
+                Update-IpBackupWindow } })
+        [void]$seg.Children.Add($rb)
+    }
+    [void]$d.Children.Add($seg)
+    if ($B.Tab -eq 'backup') { Add-IpBkBackupTab $d } else { Add-IpBkRestoreTab $d }
+    Add-IpBkProgressBlock $d
+
+    $grid = New-Object Windows.Controls.Grid
+    foreach ($h in @('*', 'Auto')) { $rd = New-Object Windows.Controls.RowDefinition; $rd.Height = $h; $grid.RowDefinitions.Add($rd) }
+    $sv = New-Object Windows.Controls.ScrollViewer; $sv.Content = $d; [void]$grid.Children.Add($sv); $B.Scroll = $sv
+    $foot = New-Object Windows.Controls.DockPanel
+    $bp = New-IpPanel 'Horizontal'; [Windows.Controls.DockPanel]::SetDock($bp, 'Right')
+    $bc = New-IpButton 'Zavřít' 'Btn' $null '0,0,10,0'; $bc.Add_Click({ Invoke-IpSafe { $script:S.B.Win.Close() } })
+    $bs = New-IpButton 'Zastavit' 'Btn' $null '0,0,10,0'; $bs.Visibility = 'Collapsed'
+    $bs.Add_Click({ Invoke-IpSafe { if ($script:S.B.State) { $script:S.B.State['Cancel'] = $true; Show-IpToast 'Zastavuji kopírování…' } } })
+    $bg = New-IpButton 'Zálohovat' 'Primary' $null '' '18,8'
+    $bg.Add_Click({ Invoke-IpSafe { if ($script:S.B.Tab -eq 'backup') { Start-IpBackupRun } else { Start-IpRestoreRun } } })
+    [void]$bp.Children.Add($bc); [void]$bp.Children.Add($bs); [void]$bp.Children.Add($bg); [void]$foot.Children.Add($bp)
+    $st = New-IpText '' 13 'Normal' $script:Col.Muted -Wrap; $st.VerticalAlignment = 'Center'; [void]$foot.Children.Add($st)
+    $B.SumText = $st; $B.GoBtn = $bg; $B.StopBtn = $bs
+    $fb = New-IpBorder -Child $foot -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '0,1,0,0' -Padding '20,12'
+    [Windows.Controls.Grid]::SetRow($fb, 1); [void]$grid.Children.Add($fb)
+    $w.Content = $grid
+    Update-IpBkFooter
+    $B.ScrollTo = $off
+    if ($off) { [void]$sv.Dispatcher.BeginInvoke([Windows.Threading.DispatcherPriority]::Loaded, [Action] { if ($script:S.B.Scroll) { $script:S.B.Scroll.ScrollToVerticalOffset($script:S.B.ScrollTo) } }) }
+}
+
+function Start-IpBkRunCommon { param([string] $Op, [object[]] $Steps)
+    $B = $script:S.B
+    $B.Busy = $true; $B.Op = $Op; $B.Log.Clear(); $B.Done = $null; $B.Prog = $null
+    $B.ItemState = [ordered]@{}; foreach ($s in $Steps) { $B.ItemState[[string]$s[0]] = @('na', [string]$s[1], 'čeká') }
+    $B.State = [hashtable]::Synchronized(@{ Cancel = $false })
+}
+
+function Start-IpBackupRun {
+    $B = $script:S.B
+    if ($B.Busy) { return }
+    if (Test-IpBusy) { Show-IpToast 'Počkejte na dokončení instalace programů.'; return }
+    $u = Get-IpBkUser $B.Sid; if (-not (Test-IpBkAllowed $u)) { return }
+    $entry = $B.Items[$B.Sid]; if (-not $entry) { Show-IpToast 'Počkejte, až se načtou složky uživatele.'; return }
+    $sel = $B.SelBy[$B.Sid]
+    $pick = @($entry.Items | Where-Object { $sel.ContainsKey($_.Id) -and $sel[$_.Id] })
+    if (-not $pick.Count) { Show-IpToast 'Vyberte, co zálohovat.'; return }
+    $target = ([string]$B.Target).Trim().TrimEnd('\')
+    if (-not $target) { Show-IpToast 'Vyberte, kam zálohu uložit.'; return }
+    $browsers = @($pick | Where-Object Group -eq 'browser')
+    $running = @(if ($browsers.Count) { Get-IpRunningBrowsers -Sid $u.Sid -Ids @($browsers | ForEach-Object Id) })
+    $close = @()
+    if ($running.Count) {
+        $names = ($running | ForEach-Object Name) -join ', '
+        $who = if ($u.Self) { 'Máte' } else { "Uživatel $($u.Name) má" }
+        $a = Show-IpBkConfirm -Title "Zavřít $names?" -Lines @("$who spuštěný prohlížeč $names. Otevřené soubory profilu (hesla, historie, záložky) by nešly zkopírovat.", 'Zavřením se ztratí jen neodeslané formuláře; otevřené karty prohlížeč po spuštění obnoví.') -Buttons @(@('close', 'Zavřít a zálohovat', 'Primary'), @('go', 'Zálohovat bez zavření', 'Btn'))
+        if (-not $a) { return }
+        if ($a -eq 'close') { $close = @($running | ForEach-Object Id) }
+    }
+    $select = @($pick | ForEach-Object { @{ Id = $_.Id; Mode = [string]$sel[$_.Id]; Size = (Get-IpBkItemSize $_ ([string]$sel[$_.Id])) } })
+    Save-IpBkRememberedTarget $target
+    $steps = @($pick | ForEach-Object { , @($_.Id, ($_.Name + $(if ($_.Group -eq 'browser') { if ($sel[$_.Id] -eq 'bookmarks') { ' – jen záložky' } else { ' – celý profil' } }))) })
+    if (@($pick | Where-Object { $_.Kind -eq 'chromium' -and $sel[$_.Id] -eq 'full' }).Count) { $steps += , @('dpapi', 'Klíče Windows pro hesla prohlížečů (DPAPI)') }
+    Start-IpBkRunCommon -Op 'backup' -Steps $steps
+    Write-IpLog -Settings $script:S.Settings -Message ("Záloha – spouštím: $($u.Name) -> $target · " + (($select | ForEach-Object { "$($_.Id)=$($_.Mode)" }) -join ', '))
+    Start-IpJob -Kind 'bkrun' -Script $script:BkRunJob -Params @{ Settings = $script:S.Settings; Sid = $u.Sid; Select = $select; Target = $target; Queue = $script:S.Queue; State = $B.State; CloseIds = [string[]]$close }
+    Update-IpBackupWindow
+}
+
+function Start-IpRestoreRun {
+    $B = $script:S.B
+    if ($B.Busy) { return }
+    if (Test-IpBusy) { Show-IpToast 'Počkejte na dokončení instalace programů.'; return }
+    $bk = @($B.Backups | Where-Object Path -eq $B.Pick)[0]; if (-not $bk) { return }
+    $u = Get-IpBkUser $B.RSid; if (-not (Test-IpBkAllowed $u)) { return }
+    $items = @($bk.Items | Where-Object { $B.RSel.Contains([string]$_.Id) })
+    if (-not $items.Count) { Show-IpToast 'Vyberte, co obnovit.'; return }
+    $bids = @($items | Where-Object { [string]$_.Id -in @('chrome', 'edge', 'brave', 'opera', 'firefox') } | ForEach-Object { [string]$_.Id })
+    $running = @(if ($bids.Count) { Get-IpRunningBrowsers -Sid $u.Sid -Ids $bids })
+    $lines = @("Do profilu $($u.Name) ($($u.ProfilePath)) se nahraje:")
+    foreach ($it in $items) { $lines += "•  $($it.Name)$(if ([string]$it.Mode -eq 'bookmarks') { ' – jen záložky' } elseif ([string]$it.Group -eq 'browser') { ' – celý profil (stávající se odloží jako *.pred-obnovou-…)' })" }
+    $lines += 'Soubory, které jsou na tomto PC novější, se nepřepíší.'
+    if ($running.Count) { $lines += "Spuštěný prohlížeč ($(($running | ForEach-Object Name) -join ', ')) se před obnovou zavře." }
+    if ($bk.Sid -and $bk.Sid -ne $u.Sid -and @($items | Where-Object { [string]$_.Mode -eq 'full' -and [string]$_.Id -ne 'firefox' -and [string]$_.Group -eq 'browser' }).Count) { $lines += 'Jiný účet než v záloze – uložená hesla Chrome / Edge / Brave / Opera nepůjdou přečíst.' }
+    $a = Show-IpBkConfirm -Title "Obnovit zálohu $($bk.User)$(if ($bk.Created) { ' z ' + $bk.Created.ToString('d. M. yyyy') })?" -Lines $lines -Buttons @(, @('go', 'Obnovit', 'Primary')) -Icon 'info'
+    if (-not $a) { return }
+    $ids = [string[]]@($items | ForEach-Object { [string]$_.Id })
+    $steps = @($items | ForEach-Object { , @([string]$_.Id, [string]$_.Name) })
+    if (@($items | Where-Object { [string]$_.Mode -eq 'full' -and [string]$_.Id -in @('chrome', 'edge', 'brave', 'opera') }).Count -and @($bk.Items | Where-Object { [string]$_.Id -eq 'dpapi' }).Count) { $steps += , @('dpapi', 'Klíče Windows pro hesla prohlížečů (DPAPI)') }
+    Start-IpBkRunCommon -Op 'restore' -Steps $steps
+    Write-IpLog -Settings $script:S.Settings -Message ("Obnova – spouštím: $($bk.Path) -> $($u.Name) · $($ids -join ', ')")
+    Start-IpJob -Kind 'bkrun' -Script $script:BkRestoreJob -Params @{ Settings = $script:S.Settings; Path = $bk.Path; Sid = $u.Sid; Ids = $ids; Queue = $script:S.Queue; State = $B.State; CloseIds = [string[]]@($running | ForEach-Object Id) }
+    Update-IpBackupWindow
+}
+
+function Receive-IpBkEvent {
+    # Události záloh z fronty. Vrací 'full' (překreslit okno), 'prog' (jen průběh) nebo ''.
+    param($M)
+    $B = $script:S.B
+    switch ($M.Kind) {
+        'bkusers' {
+            $B.UsersLoading = $false; $B.Error = [string]$M.Error; $B.Users = @($M.Users)
+            if (-not $B.Sid -or -not (Get-IpBkUser $B.Sid)) {
+                $allowed = @($B.Users | Where-Object { Test-IpBkAllowed $_ })
+                $pick = $null
+                if ($script:S.User) { $pick = @($allowed | Where-Object Sid -eq $script:S.User.Sid)[0] }
+                if (-not $pick) { $pick = @($allowed | Where-Object Self)[0] }
+                if (-not $pick) { $pick = $allowed[0] }
+                if ($pick) { Select-IpBkUser $pick.Sid }
+            }
+            if ($B.Pick) { Select-IpBkBackup $B.Pick }
+            return 'full'
+        }
+        'bkitems' {
+            [void]$B.ItemsLoading.Remove("$($M.Sid)|$($M.NoSize)")
+            $e = @{ Items = @($M.Items); Error = [string]$M.Error }
+            if ($M.NoSize) { $B.Paths[[string]$M.Sid] = $e; return 'full' }
+            $B.Items[[string]$M.Sid] = $e
+            if (-not $B.SelBy.ContainsKey([string]$M.Sid)) {
+                $sel = @{}; foreach ($it in @($M.Items)) { if ($it.Default) { $sel[$it.Id] = [string]$it.Default } }
+                $B.SelBy[[string]$M.Sid] = $sel
+            }
+            return 'full'
+        }
+        'bklist' {
+            $B.ListLoading = $false; $B.ListError = [string]$M.Error
+            if ($M.Single) {
+                $one = @($M.Backups)
+                if ($one.Count) { $B.Backups = @($one + @($B.Backups | Where-Object { $_.Path -ne $one[0].Path })); Select-IpBkBackup $one[0].Path }
+            }
+            else {
+                $B.Backups = @($M.Backups)
+                if ($B.Pick -and @($B.Backups | Where-Object Path -eq $B.Pick).Count) { Select-IpBkBackup $B.Pick }
+                elseif (@($B.Backups).Count) { Select-IpBkBackup @($B.Backups)[0].Path } else { $B.Pick = '' }
+            }
+            return 'full'
+        }
+        'bkstart' { $B.DestPath = [string]$M.Path; return 'full' }
+        'bklog' { [void]$B.Log.Add($M); Add-IpLogLine "Záloha: $($M.Message)"; if ($B.LogOpen) { return 'full' }; return '' }
+        'bkprog' { $B.Prog = $M; return 'prog' }
+        'bkitem' {
+            $k = [string]$M.Id
+            $name = if ($B.ItemState.Contains($k)) { $B.ItemState[$k][1] } else { [string]$M.Message }
+            $B.ItemState[$k] = @([string]$M.State, $name, $(if ($M.State -eq 'run') { 'kopíruji…' } else { [string]$M.Message }))
+            return 'full'
+        }
+        'bkdone' {
+            $B.Busy = $false; $B.Done = $M; $B.State = $null; $B.Prog = $null
+            foreach ($k in @($B.ItemState.Keys)) { if ($B.ItemState[$k][0] -in @('na', 'run')) { $B.ItemState[$k] = @('na', $B.ItemState[$k][1], 'neprovedeno') } }
+            $bad = @($M.Results | Where-Object { $_.Result -eq 'err' }).Count
+            Show-IpToast $(if ($bad) { "Záloha / obnova: $bad $(Get-IpPlural $bad 'chyba' 'chyby' 'chyb') – podrobnosti v okně Záloha uživatele." } elseif ($M.Op -eq 'backup') { 'Záloha dokončena.' } else { 'Obnova dokončena.' })
+            if ($M.Op -eq 'backup') { $B.Backups = $null; $B.RRoot = $B.Target }
+            else { $B.Paths = @{}; $B.Items = @{} }
+            return 'full'
+        }
+    }
+    return ''
+}
+
+#endregion
+
 #region Manuál
 
 function Show-IpManual {
@@ -1561,7 +2254,116 @@ function Show-IpManual {
     $w.Background = Get-IpBrush $script:Col.Bg; $w.FontFamily = 'Segoe UI'; $w.FontSize = 14
     $w.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Escape') { $s.Close() } })
     $script:S.ManualWin = $w; $w.Add_Closed({ $script:S.ManualWin = $null }); Set-IpOffscreen $w
-    $d = New-IpPanel -Margin '34,26,34,40'; $d.MaxWidth = 860; $d.HorizontalAlignment = 'Left'
+    Update-IpManual
+    [void]$w.ShowDialog()
+}
+
+function Get-IpTechInfo {
+    # Technické údaje pro správce: [popisek, hodnota, poznámka]. Stejný text jde zkopírovat do tiketu.
+    $st = $script:S.Settings
+    $os = try { $c = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; "$($c.Caption) · verze $($c.Version) · $($c.OSArchitecture)" } catch { [Environment]::OSVersion.VersionString }
+    $task = try { Get-IpBrokerTask -Settings $st } catch { $null }
+    $mode = if ($script:S.IsAdmin) { 'správce – vše provádí okno' } elseif ($script:S.UseBroker) { 'běžný uživatel – instaluje systémová úloha (bez UAC)' } else { 'běžný uživatel bez systémové úlohy – jen prohlížení' }
+    return @(
+        , @('Verze aplikace', "Instalace programů $(Get-IpVersion)", '')
+        , @('Zdrojový kód (GitHub)', (Get-IpRepoUrl), 'záloha kódu a historie všech verzí (tagy v3.0, v3.1, …); každá nová verze se nahrává i sem')
+        , @('Aplikace na NAS (backend)', $st.DeployPath, $(if ($st.DeployPathOverridden) { 'změněno v tomto okně – registr HKLM\SOFTWARE\InstalaceProgramu, hodnota NasPath' } else { 'výchozí – config\settings.json, deployPath' }))
+        , @('Výchozí adresa backendu', $st.DeployPathDefault, 'settings.json deployPath a řádek set "NAS=..." ve spouštěči Instalace-programu.cmd')
+        , @('Spuštěno z', $script:S.Root, $(if ($script:S.Root -like "$($st.AppDirectory)*") { 'místní kopie systémové úlohy (obnovuje se z NAS při každém spuštění úlohy)' } else { '' }))
+        , @('Spouštěč na plochu', 'Instalace-programu.cmd', 'na plochu stačí jen tento soubor (1 kB). Adresu bere z registru NasPath, jinak z řádku set "NAS=..."; zbytek aplikace je jen na NAS.')
+        , @('Zdroj instalátorů (NAS)', (@($st.SourceRoots) -join '; '), 'settings.json sourceRoots')
+        , @('Cíl záloh uživatelů', $(if ($st.BackupRoot) { $st.BackupRoot } else { '(nenastaveno)' }), 'settings.json backupRoot – v okně Záloha uživatele jde zvolit jiný (NAS, disk, USB)')
+        , @('Data, logy, index', $st.DataDirectory, "logy: $($st.LogDirectory) · index NAS: $($st.IndexPath)")
+        , @('Místní kopie (systémová úloha)', $st.AppDirectory, '')
+        , @('Systémová úloha', $st.BrokerTaskName, $(if ($task) { "nasazena · $(if ($task.Enabled) { 'zapnutá' } else { 'VYPNUTÁ' })" } else { 'na tomto PC není – bez práv správce je potřeba UAC (viz Správa a nasazení)' }))
+        , @('Účet a režim', "$([Environment]::UserDomainName)\$([Environment]::UserName)", $mode)
+        , @('Přihlášený u PC', $(if ($script:S.User) { $script:S.User.Name } else { '–' }), 'instalace jen pro uživatele a záloha se standardně týkají tohoto účtu')
+        , @('Počítač', "$([Environment]::MachineName) · $os", "PowerShell $($PSVersionTable.PSVersion)")
+    )
+}
+
+function Show-IpNasPathDialog {
+    # Změna adresy backendu na NAS (registr HKLM – jen správce). Prázdná hodnota = výchozí ze settings.json.
+    $st = $script:S.Settings
+    $w = New-Object Windows.Window
+    $w.Title = 'Adresa aplikace na NAS'; $w.Owner = $script:S.ManualWin; $w.WindowStartupLocation = 'CenterOwner'; $w.SizeToContent = 'Height'; $w.Width = 700; $w.ResizeMode = 'NoResize'
+    $w.FontFamily = 'Segoe UI'; $w.FontSize = 13.5; $w.Background = Get-IpBrush $script:Col.Surface
+    $p = New-IpPanel -Margin '22,20,22,20'
+    [void]$p.Children.Add((New-IpText 'Kde je aplikace (backend) na NAS' 17 'Bold'))
+    [void]$p.Children.Add((New-IpText 'Složka se souborem InstalaceProgramu.ps1 a podsložkami config, src, tools. Spouštěč na ploše i systémová úloha ji budou brát odsud. Uloží se do registru tohoto PC (HKLM\SOFTWARE\InstalaceProgramu, NasPath) – pro všechny PC najednou ji nastavte přes GPO (Předvolby → Registr) nebo změňte výchozí adresu v settings.json a ve spouštěči.' 13 'Normal' $script:Col.Muted -Wrap -Margin '0,8,0,10'))
+    $tb = New-Object Windows.Controls.TextBox; $tb.Padding = '8,5'; $tb.FontFamily = 'Consolas'; $tb.Text = $st.DeployPath; $tb.BorderBrush = Get-IpBrush $script:Col.Line
+    [void]$p.Children.Add($tb)
+    $msg = New-IpText "Výchozí: $($st.DeployPathDefault)" 12.5 'Normal' $script:Col.Muted -Wrap -Margin '0,6,0,0'; [void]$p.Children.Add($msg)
+    $acts = New-IpPanel 'Horizontal' '0,18,0,0'; $acts.HorizontalAlignment = 'Right'
+    $save = New-IpButton 'Uložit' 'Primary' $null '0,0,8,0'
+    $def = New-IpButton 'Vrátit výchozí' 'Btn' $null '0,0,8,0'; $def.IsEnabled = [bool]$st.DeployPathOverridden
+    $no = New-IpButton 'Zpět' 'Btn' $null; $no.IsCancel = $true
+    $w.Tag = @{ Tb = $tb; Msg = $msg; Confirm = $false }
+    $save.Add_Click({ param($s, $e) Invoke-IpSafe {
+            $win = [Windows.Window]::GetWindow($s); $t = $win.Tag
+            $v = $t.Tb.Text.Trim().TrimEnd('\')
+            if (-not $v) { return }
+            $ok = $false; try { $ok = Test-Path -LiteralPath (Join-Path $v 'InstalaceProgramu.ps1') } catch { }
+            if (-not $ok -and -not $t.Confirm) {
+                $t.Msg.Text = "Na adrese $v není InstalaceProgramu.ps1 (nebo NAS teď neodpovídá). Spouštěč by aplikaci nenašel. Klikněte na Uložit znovu, pokud ji chcete uložit i tak."
+                $t.Msg.Foreground = Get-IpBrush $script:Col.Err; $t.Confirm = $true; return
+            }
+            Set-IpNasOverride -Path $(if ($v -eq $script:S.Settings.DeployPathDefault) { '' } else { $v })
+            Write-IpLog -Settings $script:S.Settings -Level Warning -Message "Adresa aplikace na NAS změněna na $v (registr HKLM\SOFTWARE\InstalaceProgramu\NasPath)."
+            $win.DialogResult = $true } })
+    $def.Add_Click({ param($s, $e) Invoke-IpSafe {
+            Set-IpNasOverride -Path ''
+            Write-IpLog -Settings $script:S.Settings -Level Warning -Message 'Adresa aplikace na NAS vrácena na výchozí (settings.json).'
+            [Windows.Window]::GetWindow($s).DialogResult = $true } })
+    [void]$acts.Children.Add($save); [void]$acts.Children.Add($def); [void]$acts.Children.Add($no); [void]$p.Children.Add($acts)
+    $w.Content = $p
+    if ([bool]$w.ShowDialog()) {
+        $script:S.Settings = Get-IpSettings -Path (Join-Path $script:S.Root 'config\settings.json')
+        Show-IpToast "Adresa aplikace na NAS: $($script:S.Settings.DeployPath). Projeví se při dalším spuštění."
+        Update-IpManual
+    }
+}
+
+function Update-IpManual {
+    $w = $script:S.ManualWin; if (-not $w) { return }
+    $st = $script:S.Settings
+    $d = New-IpPanel -Margin '34,26,34,40'; $d.MaxWidth = 940; $d.HorizontalAlignment = 'Left'
+    [void]$d.Children.Add((New-IpText 'O instalátoru' 22 'Bold'))
+    [void]$d.Children.Add((New-IpText "Instalace programů $(Get-IpVersion) · pro správce IT · Windows 10 a 11 (PowerShell 5.1)" 12.5 'Normal' $script:Col.Muted -Margin '0,2,0,14'))
+
+    # technické údaje
+    $info = @(Get-IpTechInfo)
+    $g = New-Object Windows.Controls.Grid
+    foreach ($wd in @('230', '*')) { $cd = New-Object Windows.Controls.ColumnDefinition; $cd.Width = $wd; $g.ColumnDefinitions.Add($cd) }
+    $r = 0
+    foreach ($x in $info) {
+        $rd = New-Object Windows.Controls.RowDefinition; $rd.Height = 'Auto'; $g.RowDefinitions.Add($rd)
+        $l = New-IpText $x[0] 13 'SemiBold' -Wrap -Margin '14,7,12,7'; [Windows.Controls.Grid]::SetRow($l, $r); [void]$g.Children.Add($l)
+        $vp = New-IpPanel; $vp.Margin = '0,7,14,7'
+        $tv = New-Object Windows.Controls.TextBox; $tv.Text = [string]$x[1]; $tv.IsReadOnly = $true; $tv.BorderThickness = '0'; $tv.Background = [Windows.Media.Brushes]::Transparent
+        $tv.FontFamily = 'Consolas'; $tv.FontSize = 12.5; $tv.TextWrapping = 'Wrap'; $tv.Padding = '0'
+        [void]$vp.Children.Add($tv)
+        if ($x[2]) { [void]$vp.Children.Add((New-IpText $x[2] 12 'Normal' $script:Col.Muted -Wrap)) }
+        [Windows.Controls.Grid]::SetRow($vp, $r); [Windows.Controls.Grid]::SetColumn($vp, 1); [void]$g.Children.Add($vp)
+        if ($r) { $ln = New-IpBorder -BorderColor $script:Col.Line2 -Thickness '0,1,0,0'; [Windows.Controls.Grid]::SetRow($ln, $r); [Windows.Controls.Grid]::SetColumnSpan($ln, 2); [void]$g.Children.Add($ln) }
+        $r++
+    }
+    [void]$d.Children.Add((New-IpBorder -Child $g -Bg $script:Col.Surface -BorderColor $script:Col.Line -Thickness '1' -Radius 10))
+    $acts = New-Object Windows.Controls.WrapPanel; $acts.Margin = '0,10,0,0'
+    $mk = { param($text, $style, $tag, $click, [bool] $enabled = $true, [string] $tip = '')
+        $b = New-IpButton $text $style $tag '0,0,8,8' '12,5'; $b.IsEnabled = $enabled; if ($tip) { $b.ToolTip = $tip }; $b.Add_Click($click); [void]$acts.Children.Add($b) }
+    & $mk 'Změnit adresu na NAS…' 'Primary' $null { Invoke-IpSafe { Show-IpNasPathDialog } } $script:S.IsAdmin $(if (-not $script:S.IsAdmin) { 'Jen správce (zápis do HKLM).' } else { '' })
+    & $mk 'Otevřít aplikaci na NAS' 'Btn' $st.DeployPath { param($s, $e) Invoke-IpSafe { if (Test-Path -LiteralPath $s.Tag) { Start-Process explorer.exe -ArgumentList "`"$($s.Tag)`"" } else { Show-IpToast "Nedostupné: $($s.Tag)" } } }
+    & $mk 'Otevřít log' 'Btn' $null { Invoke-IpSafe { $f = Get-IpLogFile; if ($f -and (Test-Path $f)) { Start-Process notepad.exe -ArgumentList "`"$f`"" } else { Show-IpToast 'Log zatím neexistuje.' } } }
+    & $mk 'GitHub (zdrojový kód)' 'Btn' (Get-IpRepoUrl) { param($s, $e) Invoke-IpSafe { Start-Process ([string]$s.Tag) } } $true 'Otevře repozitář s kódem a historií verzí v prohlížeči.'
+    & $mk 'Složka logů' 'Btn' $st.LogDirectory { param($s, $e) Invoke-IpSafe { if (Test-Path -LiteralPath $s.Tag) { Start-Process explorer.exe -ArgumentList "`"$($s.Tag)`"" } } }
+    & $mk 'Zkopírovat technické údaje' 'Btn' $null { Invoke-IpSafe {
+            $t = (@(Get-IpTechInfo) | ForEach-Object { "{0}: {1}{2}" -f $_[0], $_[1], $(if ($_[2]) { "  ($($_[2]))" } else { '' }) }) -join "`r`n"
+            $h = @($script:S.Health | ForEach-Object { "  [$($_.State)] $($_.Long): $($_.Title)" }) -join "`r`n"
+            [Windows.Clipboard]::SetText("$t`r`nKontroly:`r`n$h`r`nLog: $(Get-IpLogFile)")
+            Show-IpToast 'Technické údaje a stav kontrol jsou ve schránce (pro tiket / kolegu).' } } $true 'Údaje výše + stav kontrol + cesta k logu – vložte do tiketu.'
+    [void]$d.Children.Add($acts)
+
     $sec = @(
         @('Jak s aplikací pracovat', @(
                 '1 · Úvodní kontrola ověří oprávnění, NAS, internet, instalátor Sophos, písmo Code128, místo na disku a obsah NAS. U každé chyby je postup, co udělat. Pokračovat jde vždy.',
@@ -1586,8 +2388,34 @@ function Show-IpManual {
         @('Obsah NAS a výjimky', @(
                 'Okno Obsah NAS ukazuje rozpoznané programy a verze, vyloučené soubory (odinstalátory, jazykové balíčky, jiné varianty) a nerozpoznané soubory.',
                 'Vyloučený nebo nerozpoznaný soubor jde povolit. Aplikace nejdřív ukáže, proč je vyloučený a co hrozí. Povolení platí jen do zavření instalátoru, nic se neukládá a na NAS se nic nemění.')),
+        @('Záloha a přenos dat uživatele', @(
+                "Tlačítko Záloha uživatele v horní liště. Karta Zálohovat: vyberte uživatele, co zálohovat (plocha, dokumenty, stažené soubory, obrázky, prohlížeče) a kam. Výchozí cíl: $(if ($st.BackupRoot) { $st.BackupRoot } else { '(nenastaveno)' }) (settings.json backupRoot); poslední zvolený cíl si okno pamatuje pro vás (%LOCALAPPDATA%\InstalaceProgramu\zaloha-cil.txt).",
+                'Struktura: <cíl>\<POČÍTAČ>_<login>_<rrrrMMdd-HHmm>\ s podsložkami Plocha, Dokumenty, Stazene, Obrazky, Prohlizece\<prohlížeč>, DPAPI. backup.json popisuje, co je v záloze a s jakým výsledkem, _robocopy.log je podrobný log kopírování.',
+                'Složky se hledají podle registru uživatele (User Shell Folders), takže najde i plochu / dokumenty přesměrované do OneDrive nebo jinam. Složka přesměrovaná na server se nezálohuje (data už jsou tam). Soubory jen v cloudu (OneDrive) se nestahují.',
+                'Prohlížeče Chrome, Edge, Brave, Opera, Firefox: Jen záložky, nebo Celý profil (záložky, hesla, historie, rozšíření, nastavení – bez mezipaměti). Spuštěný prohlížeč okno nabídne zavřít, jinak by otevřené soubory nešly zkopírovat.',
+                'Hesla Chrome / Edge / Brave / Opera šifruje Windows (DPAPI) klíčem účtu. S celým profilem se proto zálohují i klíče DPAPI (AppData\Roaming\Microsoft\Protect). Na novém PC je přečte jen STEJNÝ doménový účet. Pro jiný nebo místní účet: synchronizace prohlížeče (Google / Microsoft účet) nebo export hesel do CSV. Firefox nese hesla v profilu – přenesou se vždy. Přihlášení na webech (cookies) se většinou nepřenese.',
+                'Kopíruje robocopy (/E /XJ /COPY:DAT /MT:8, jako správce /B – čte i profily ostatních bez změny oprávnění). Na původním PC se nic nemění. Po dokončení se oprávnění složky zálohy omezí na SYSTEM, správce, toho, kdo zálohoval, a vlastníka dat (záloha obsahuje hesla).',
+                'Karta Obnovit ze zálohy: vyberte zálohu, uživatele na tomto PC (musí se tu aspoň jednou přihlásit) a co obnovit. Novější soubory se nepřepisují (/XO). Celý profil prohlížeče: stávající se přejmenuje na *.pred-obnovou-<datum>, nic se nemaže. Jen záložky: nahradí se jen soubor Bookmarks / places.sqlite (původní se odloží). Klíče DPAPI se jen doplní, stávající se nikdy nepřepíší.',
+                'Bez práv správce jde zálohovat a obnovit jen vlastní profil (pod vlastním účtem, se svými právy na NAS).')),
+        @('Správa a nasazení', @(
+                "Backend (celá aplikace) je na NAS: $($st.DeployPath). Nová verze = nakopírovat celou složku (config, src, tools, InstalaceProgramu.ps1, spouštěče) na toto místo. Na PC se nic neinstaluje.",
+                'Na plochu stačí jen Instalace-programu.cmd (nebo zástupce Instalace programů.lnk z NAS – má ikonu). Spouštěč hledá aplikaci: vedle sebe → registr HKLM\SOFTWARE\InstalaceProgramu NasPath → řádek set "NAS=..." ve spouštěči.',
+                'Změna adresy backendu: tlačítko Změnit adresu na NAS (zapíše NasPath do HKLM tohoto PC, jen správce). Pro všechny PC: GPO Předvolby → Registr, nebo změnit deployPath v settings.json a řádek set "NAS=..." ve spouštěči. Adresu v HKLM nemůže změnit běžný uživatel – jinak by mohl podstrčit skript, který se spustí s právy správce.',
+                'Instalace bez UAC pro běžné uživatele: systémová úloha InstalaceProgramu-Broker (nasazení GPO, tools\Install-Broker.ps1 jako SYSTEM – postup v README.md). Ověření na PC: tools\Test-Broker.ps1 jako běžný uživatel.',
+                'Nastavení: config\settings.json (cesty, limity, backupRoot, languageForAll, profileDeleteForAll), config\catalog.json (programy, pravidla rozpoznání, balíčky), config\languages.json (jazyky poboček).',
+                'Příkazová řádka (bez okna): InstalaceProgramu.ps1 -NoGui, -Bundle, -Items, -DryRun, -Scan, -LanguageReport, -SetLanguage – přehled v README.md.')),
+        @('Řešení problémů', @(
+                'Po dvojkliku se nic neotevře → Diagnostika.cmd (viditelná konzole: PowerShell, práva, ExecutionPolicy, chybějící soubory, systémová úloha). Chybové hlášení se ukládá i do %TEMP%\InstalaceProgramu-chyba-*.txt.',
+                'Spouštěč hlásí, že skript nenašel → NAS / VPN nedostupná, nebo špatná adresa backendu: zkontrolujte řádek Aplikace na NAS výše a registr NasPath (reg query HKLM\SOFTWARE\InstalaceProgramu).',
+                'Červená kontrolka NAS / Internet → klikněte na ni, okno Stav a návod má postup krok za krokem.',
+                'Instalace bez UAC nefunguje (úloha neodpovídá) → restart PC, pak tools\Test-Broker.ps1; když chybí úloha, nasaďte GPO nebo spusťte tools\Install-Broker.ps1 jako správce.',
+                'Záloha: položka s upozorněním = některé soubory byly otevřené nebo bez oprávnění (seznam v _robocopy.log v záloze). Zavřete programy uživatele (Outlook, prohlížeč) a zálohujte znovu – nová záloha je vždy samostatná složka.',
+                'Záloha na NAS selže s přístupem odepřeným → účet, pod kterým okno běží (u UAC účet správce), nemá zápis do cílové složky. Zvolte jinou složku, nebo nastavte práva na NAS.',
+                'Po obnově Chrome / Edge nezná hesla → obnoveno do jiného účtu, nebo v záloze chybí DPAPI (záloha jen záložek). Hesla přeneste synchronizací nebo exportem CSV ze starého PC.',
+                'Kolegovi nebo do tiketu pošlete: tlačítko Zkopírovat technické údaje (nahoře) + log (tlačítko Otevřít log).')),
         @('Kde jsou logy', @(
-                "Log: $($script:S.Settings.LogDirectory). Podrobné logy MSI jsou ve stejné složce. Index NAS: $($script:S.Settings.IndexPath).",
+                "Log: $($st.LogDirectory) (jeden soubor na den, PC_rrrrMMdd.log). Podrobné logy MSI jsou ve stejné složce. Index NAS: $($st.IndexPath). Bez práv správce jsou logy v %LOCALAPPDATA%\InstalaceProgramu\Logs, systémová úloha píše do C:\ProgramData\InstalaceProgramu\Logs.",
+                'Záloha: backup.json a _robocopy.log ve složce zálohy. Obnova: log kopírování v %TEMP%\InstalaceProgramu-obnova-*.log (cesta je i ve výsledku obnovy).',
                 'Když se aplikace vůbec nespustí, použijte Diagnostika.cmd – vypíše, co chybí.'))
     )
     foreach ($s in $sec) {
@@ -1595,7 +2423,6 @@ function Show-IpManual {
         foreach ($t in $s[1]) { [void]$d.Children.Add((New-IpText $t 14 'Normal' '' -Wrap -Margin '0,0,0,8')) }
     }
     $sv = New-Object Windows.Controls.ScrollViewer; $sv.Content = $d; $w.Content = $sv
-    [void]$w.ShowDialog()
 }
 
 #endregion
@@ -1616,7 +2443,9 @@ function Set-IpOffscreen { param($Window)
     # Testovací režim: okno mimo viditelnou plochu, aby nerušilo práci na počítači.
     if (-not $env:IP_SNAP_DIR) { return }
     $Window.WindowState = 'Normal'; $Window.WindowStartupLocation = 'Manual'; $Window.Left = -32000; $Window.Top = -32000
-    if ($Window -eq $script:S.Win) { $Window.Width = 1680; $Window.Height = 960 } else { $Window.Width = 1240; $Window.Height = 900 }
+    # IP_SNAP_W = šířka hlavního okna pro test (např. 1366 – běžný notebook)
+    $mw = if ($env:IP_SNAP_W) { [int]$env:IP_SNAP_W } else { 1680 }
+    if ($Window -eq $script:S.Win) { $Window.Width = $mw; $Window.Height = 960 } else { $Window.Width = 1240; $Window.Height = 900 }
     $Window.ShowInTaskbar = $false
 }
 
@@ -1624,10 +2453,10 @@ function Invoke-IpDebugView {
     # Jen pro vývoj: IP_DEBUG=start|main|status|nas|manual otevře po první kontrole danou obrazovku;
     # s IP_SNAP_DIR uloží obsah oken do PNG a aplikaci zavře.
     if ($env:IP_SNAP_DIR) {
-        $t = New-Object Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds(3)
+        $t = New-Object Windows.Threading.DispatcherTimer; $t.Interval = [TimeSpan]::FromSeconds($(if ($env:IP_DEBUG -in @('backup', 'restore')) { 14 } else { 3 }))
         $t.Add_Tick({ param($s, $e) $s.Stop(); Invoke-IpSafe {
                     Save-IpSnapshot $script:S.Win "$($env:IP_DEBUG)-main"
-                    foreach ($x in @($script:S.StatusWin, $script:S.NasWin, $script:S.ManualWin, $script:S.L.Win)) { if ($x) { Save-IpSnapshot $x "$($env:IP_DEBUG)-dialog"; $x.Close() } }
+                    foreach ($x in @($script:S.StatusWin, $script:S.NasWin, $script:S.ManualWin, $script:S.L.Win, $script:S.B.Win)) { if ($x) { Save-IpSnapshot $x "$($env:IP_DEBUG)-dialog"; $x.Close() } }
                     $script:S.Win.Close() } })
         $t.Start()
     }
@@ -1638,6 +2467,8 @@ function Invoke-IpDebugView {
         'nas' { Show-IpNasWindow }
         'manual' { Show-IpManual }
         'lang' { Show-IpLanguageWindow }
+        'backup' { Show-IpBackupWindow -Tab 'backup' }
+        'restore' { Show-IpBackupWindow -Tab 'restore' }
     }
 }
 
@@ -1647,7 +2478,7 @@ function Show-IpApp {
     $xaml = [IO.File]::ReadAllText((Join-Path $SrcDir 'MainWindow.xaml'), [Text.Encoding]::UTF8)
     $win = [Windows.Markup.XamlReader]::Load([Xml.XmlReader]::Create((New-Object IO.StringReader $xaml)))
     $script:C = @{}
-    foreach ($n in 'HdSub', 'TabStart', 'TabMain', 'LedPanel', 'BtnLang', 'BtnNas', 'BtnManual', 'PageStart', 'StartSub', 'CheckList', 'BtnRecheck', 'BtnGo', 'StartMsg', 'PageMain',
+    foreach ($n in 'HdSub', 'TabStart', 'TabMain', 'LedPanel', 'BtnBackup', 'BtnLang', 'BtnNas', 'BtnManual', 'PageStart', 'StartSub', 'CheckList', 'BtnRecheck', 'BtnGo', 'StartMsg', 'PageMain',
         'WhoText', 'BundleList', 'BtnClear', 'MidTitle', 'MidCount', 'ModePanel', 'RbRec', 'RbAll', 'RbUser', 'SelScroll', 'SelList', 'RunPanel', 'SummaryBox', 'SummaryPanel',
         'ProgText', 'Prog', 'ProbList', 'RunList', 'LogBox', 'BtnLog', 'BtnCancel', 'BtnNew', 'BtnInstall', 'SumText', 'TxtSearch', 'SearchHint', 'ChkMissing', 'CmbCat',
         'BusyNote', 'CatScroll', 'CatList', 'Toast', 'ToastText') {
@@ -1670,14 +2501,25 @@ function Show-IpApp {
             Log = New-Object System.Collections.ArrayList; Done = $null; SelfSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             Scroll = $null; ScrollTo = 0; SumText = $null; SaveBtn = $null; Del = (New-Object 'System.Collections.Generic.HashSet[string]'); ThenSave = $false; PrevDone = $null
         }
+        # okno Záloha uživatele
+        B = @{
+            Win = $null; Tab = 'backup'; Users = $null; UsersLoading = $false; Error = ''; Sid = ''; Items = @{}; Paths = @{}; SelBy = @{}
+            ItemsLoading = (New-Object 'System.Collections.Generic.HashSet[string]'); Target = ''; Busy = $false; Op = ''; State = $null
+            Log = New-Object System.Collections.ArrayList; LogOpen = $false; Prog = $null; ItemState = [ordered]@{}; Done = $null; DestPath = ''
+            RRoot = ''; Backups = $null; ListLoading = $false; ListError = ''; Pick = ''; RSid = ''; RSel = (New-Object 'System.Collections.Generic.HashSet[string]')
+            Scroll = $null; ScrollTo = 0; SumText = $null; GoBtn = $null; StopBtn = $null; ProgBar = $null; ProgText = $null
+        }
+        Root = (Split-Path -Parent $SrcDir)
+        Pool = $null; AppxCache = [hashtable]::Synchronized(@{})
     }
-    $script:C.HdSub.Text = "$([Environment]::MachineName) · v3"
+    $script:C.HdSub.Text = "$([Environment]::MachineName) · v$(Get-IpVersion)"
 
     $win.Dispatcher.Add_UnhandledException({ param($s, $e) $e.Handled = $true; Write-IpUiError $e.Exception })
     $script:C.TabStart.Add_Click({ Invoke-IpSafe { Set-IpPage 'start' } })
     $script:C.TabMain.Add_Click({ Invoke-IpSafe { Set-IpPage 'main' } })
     $script:C.BtnGo.Add_Click({ Invoke-IpSafe { Set-IpPage 'main' } })
     $script:C.BtnRecheck.Add_Click({ Invoke-IpSafe { Start-IpHealthCheck -Rescan $true } })
+    $script:C.BtnBackup.Add_Click({ Invoke-IpSafe { Show-IpBackupWindow } })
     $script:C.BtnLang.Add_Click({ Invoke-IpSafe { Show-IpLanguageWindow } })
     $script:C.BtnNas.Add_Click({ Invoke-IpSafe { Show-IpNasWindow } })
     $script:C.BtnManual.Add_Click({ Invoke-IpSafe { Show-IpManual } })
@@ -1693,7 +2535,11 @@ function Show-IpApp {
     $win.Add_Closing({ param($s, $e)
             if (Test-IpBusy) {
                 $a = [Windows.MessageBox]::Show('Instalace stále běží. Opravdu zavřít? Právě instalovaný program se dokončí na pozadí, další se už nespustí.', 'Instalace programů', 'YesNo', 'Warning')
-                if ($a -ne 'Yes') { $e.Cancel = $true } else { $script:S.Run.State['Cancel'] = $true }
+                if ($a -ne 'Yes') { $e.Cancel = $true; return } else { $script:S.Run.State['Cancel'] = $true }
+            }
+            if ($script:S.B.Busy) {
+                $a = [Windows.MessageBox]::Show('Záloha nebo obnova dat uživatele stále běží. Opravdu zavřít? Kopírování se zastaví a záloha zůstane neúplná.', 'Instalace programů', 'YesNo', 'Warning')
+                if ($a -ne 'Yes') { $e.Cancel = $true } elseif ($script:S.B.State) { $script:S.B.State['Cancel'] = $true }
             } })
 
     $timer = New-Object Windows.Threading.DispatcherTimer
@@ -1702,8 +2548,14 @@ function Show-IpApp {
     $timer.Start()
     $pulse = New-Object Windows.Threading.DispatcherTimer
     $pulse.Interval = [TimeSpan]::FromSeconds(60)
-    $pulse.Add_Tick({ Invoke-IpSafe { if (-not (Test-IpBusy) -and -not $script:S.Checking) { Start-IpHealthCheck -Rescan $false } } })
+    # Průběžná kontrola jen když je aplikace v popředí (na pozadí by zbytečně zatěžovala PC);
+    # po návratu do okna se hned doběhne, pokud je poslední kontrola starší než minuta.
+    $pulse.Add_Tick({ Invoke-IpSafe {
+                $active = @(@($script:S.Win, $script:S.L.Win, $script:S.B.Win, $script:S.NasWin, $script:S.StatusWin, $script:S.ManualWin) | Where-Object { $_ -and $_.IsActive }).Count
+                if ($active -and $script:S.Win.WindowState -ne 'Minimized' -and -not (Test-IpBusy) -and -not $script:S.Checking -and -not $script:S.B.Busy) { Start-IpHealthCheck -Rescan $false } } })
     $pulse.Start()
+    $win.Add_Activated({ Invoke-IpSafe {
+                if ($script:S.CheckedAt -and ((Get-Date) - $script:S.CheckedAt).TotalSeconds -gt 70 -and -not (Test-IpBusy) -and -not $script:S.Checking -and -not $script:S.B.Busy) { Start-IpHealthCheck -Rescan $false } } })
 
     Write-IpLog -Settings $Settings -Message "=== Start Instalace programů v3 na $([Environment]::MachineName) jako $([Environment]::UserDomainName)\$([Environment]::UserName) ==="
     Update-IpAll
@@ -1722,6 +2574,7 @@ function Show-IpApp {
     Set-IpOffscreen $win
     [void]$win.ShowDialog()
     $timer.Stop(); $pulse.Stop()
+    if ($script:S.Pool -and -not @($script:S.Jobs | Where-Object { -not $_.Handle.IsCompleted }).Count) { try { $script:S.Pool.Dispose() } catch { } }
 }
 
 #endregion
